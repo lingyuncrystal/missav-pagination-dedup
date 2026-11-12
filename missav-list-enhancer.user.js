@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 列表增强（翻页去重 + 标题重译）
 // @namespace    https://missav.ws/
-// @version      2.0.5
+// @version      2.0.6
 // @description  两个功能合一：1) 翻页去重——列表翻页时服务端常在页边界返回重复影片，自动隐藏；2) 标题修正——默认抓取日文原版标题替换机翻中文，可选填入 Kimi(Moonshot) API Key 升级为大模型重译（演员名保留日文原文）
 // @author       lingyuncrystal
 // @license      MIT
@@ -261,14 +261,17 @@
 
     /* ---------------- Kimi 大模型翻译 ---------------- */
 
-    function chatCompletion(messages, useJsonFormat) {
+    function chatCompletion(messages, useJsonFormat, useThinking) {
         const url = config.baseUrl.replace(/\/+$/, '') + '/chat/completions';
         const body = {
             model: config.model,
             messages,
-            // 不传 temperature：kimi 新一代模型（k2.5 等）只允许 temperature=1，传 0.3 会报 400
+            // 不传 temperature：kimi 新一代模型只允许固定值，传了会报 400
         };
         if (useJsonFormat) body.response_format = { type: 'json_object' };
+        // k2.6 默认开启思考模式（推理很慢），翻译任务禁用思考提速；
+        // 不支持该参数的模型会在 400 重试时去掉
+        if (useThinking !== false) body.thinking = { type: 'disabled' };
         const payload = JSON.stringify(body);
         const headers = {
             'Content-Type': 'application/json',
@@ -385,8 +388,8 @@
                     text = await chatCompletion(messages, true);
                 } catch (e) {
                     if (e.status === 400) {
-                        // 部分模型/网关不支持 response_format，去掉重试
-                        text = await chatCompletion(messages, false);
+                        // 部分模型/网关不支持 response_format 或 thinking 参数，都去掉重试
+                        text = await chatCompletion(messages, false, false);
                     } else {
                         throw e;
                     }
@@ -492,6 +495,22 @@
 
         running = true;
         setButtonState('translating');
+        // 把当前可翻的（已有日文、缺中文）送去大模型；返回是否还有剩余
+        const translateTodo = async () => {
+            if (config.mode !== 'llm' || !config.apiKey) return;
+            const todo = [...new Set(collectCards().filter((c) => !c.hidden).map((c) => c.slug))]
+                .filter((s) => cache[s] && cache[s].ja && !cache[s].zh);
+            for (let i = 0; i < todo.length; i += 20) {
+                const chunk = todo.slice(i, i + 20);
+                const jaArr = chunk.map((s) => cache[s].ja);
+                const zhArr = await translateBatch(jaArr);
+                chunk.forEach((s, j) => {
+                    cache[s].zh = zhArr[j];
+                });
+                saveCache(cache);
+                applyCached(collectCards());
+            }
+        };
         try {
             if (needJa.length) {
                 const isDetail = !!document.querySelector('h1') && !document.querySelector('.thumbnail');
@@ -501,37 +520,31 @@
                 });
                 saveCache(cache);
                 applyCached(collectCards());
+                // 先翻译列表页已覆盖的部分，用户尽早看到中文
+                await translateTodo();
                 // 各语言列表收录范围不同，日文列表页可能缺当前页的部分番号；
-                // 缺口逐个抓日文详情页补齐（结果永久缓存，只补一次）
+                // 缺口抓日文详情页补齐（两个并发，结果永久缓存，只补一次）
                 if (!isDetail) {
-                    const missing = needJa.filter((s) => !cache[s] || !cache[s].ja);
-                    for (const s of missing.slice(0, 8)) {
-                        try {
-                            const m = await fetchJaTitles(jaDetailUrl(s), true);
-                            if (m[s]) {
-                                cache[s] = Object.assign(cache[s] || {}, { ja: m[s] });
-                                saveCache(cache);
-                                applyCached(collectCards());
+                    const missing = needJa.filter((s) => !cache[s] || !cache[s].ja).slice(0, 8);
+                    for (let i = 0; i < missing.length; i += 2) {
+                        await Promise.all(missing.slice(i, i + 2).map(async (s) => {
+                            try {
+                                const m = await fetchJaTitles(jaDetailUrl(s), true);
+                                if (m[s]) {
+                                    cache[s] = Object.assign(cache[s] || {}, { ja: m[s] });
+                                    saveCache(cache);
+                                    applyCached(collectCards());
+                                }
+                            } catch (e) {
+                                console.warn('[MissAV 列表增强] 详情页补抓失败 ' + s, e);
                             }
-                        } catch (e) {
-                            console.warn('[MissAV 列表增强] 详情页补抓失败 ' + s, e);
-                        }
+                        }));
                     }
+                    // 补抓到位的新条目再翻一次
+                    await translateTodo();
                 }
-            }
-            if (config.mode === 'llm' && config.apiKey) {
-                const todo = [...new Set(collectCards().filter((c) => !c.hidden).map((c) => c.slug))]
-                    .filter((s) => cache[s] && cache[s].ja && !cache[s].zh);
-                for (let i = 0; i < todo.length; i += 20) {
-                    const chunk = todo.slice(i, i + 20);
-                    const jaArr = chunk.map((s) => cache[s].ja);
-                    const zhArr = await translateBatch(jaArr);
-                    chunk.forEach((s, j) => {
-                        cache[s].zh = zhArr[j];
-                    });
-                    saveCache(cache);
-                    applyCached(collectCards());
-                }
+            } else {
+                await translateTodo();
             }
             lastError = null;
             setButtonState('done');
