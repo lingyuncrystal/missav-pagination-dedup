@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 列表增强（翻页去重 + 标题重译）
 // @namespace    https://missav.ws/
-// @version      2.0.1
+// @version      2.0.2
 // @description  两个功能合一：1) 翻页去重——列表翻页时服务端常在页边界返回重复影片，自动隐藏；2) 标题修正——默认抓取日文原版标题替换机翻中文，可选填入 Kimi(Moonshot) API Key 升级为大模型重译（演员名保留日文原文）
 // @author       lingyuncrystal
 // @license      MIT
@@ -269,45 +269,65 @@
         };
         if (useJsonFormat) body.response_format = { type: 'json_object' };
         const payload = JSON.stringify(body);
-        return new Promise((resolve, reject) => {
-            const onerror = (msg, status) => {
-                const err = new Error(msg);
-                err.status = status;
-                reject(err);
-            };
-            if (typeof GM_xmlhttpRequest === 'function') {
+        const headers = {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer ' + config.apiKey,
+        };
+        const apiError = (status, text) => {
+            const err = new Error('API ' + status + ': ' + String(text || '').slice(0, 200));
+            err.status = status;
+            err.fatal = true; // 服务器明确响应（401/404 等），换通道无意义
+            return err;
+        };
+        // 通道一：GM_xmlhttpRequest（在扩展上下文发请求，不受页面 CSP 限制）
+        function gmRequest() {
+            return new Promise((resolve, reject) => {
+                if (typeof GM_xmlhttpRequest !== 'function') {
+                    reject(new Error('当前脚本管理器不支持 GM_xmlhttpRequest'));
+                    return;
+                }
                 GM_xmlhttpRequest({
                     method: 'POST',
                     url,
-                    headers: {
-                        'Content-Type': 'application/json',
-                        Authorization: 'Bearer ' + config.apiKey,
-                    },
+                    headers,
                     data: payload,
                     timeout: 60000,
                     onload: (r) => {
                         if (r.status >= 200 && r.status < 300) resolve(r.responseText);
-                        else onerror('API ' + r.status + ': ' + String(r.responseText).slice(0, 200), r.status);
+                        else reject(apiError(r.status, r.responseText));
                     },
-                    onerror: () => onerror('网络错误'),
-                    ontimeout: () => onerror('请求超时'),
+                    onerror: (r) => {
+                        const detail = r && (r.error || r.statusText || r.status) ?
+                            '（' + (r.error || r.statusText || r.status) + '）' : '';
+                        const err = new Error('网络错误' + detail);
+                        err.retryable = true;
+                        reject(err);
+                    },
+                    ontimeout: () => {
+                        const err = new Error('请求超时');
+                        err.retryable = true;
+                        reject(err);
+                    },
                 });
-            } else {
-                fetch(url, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        Authorization: 'Bearer ' + config.apiKey,
-                    },
-                    body: payload,
-                })
-                    .then((r) => {
-                        if (!r.ok) return r.text().then((t) => onerror('API ' + r.status + ': ' + t.slice(0, 200), r.status));
-                        return r.text();
-                    })
-                    .then((t) => t && resolve(t))
-                    .catch((e) => onerror(String(e)));
-            }
+            });
+        }
+        // 通道二：fetch 兜底（Moonshot 已确认返回 Access-Control-Allow-Origin，
+        // 部分手机脚本管理器 GM 请求实现有问题时可用）
+        function fetchRequest() {
+            return fetch(url, { method: 'POST', headers, body: payload }).then((r) => {
+                if (r.ok) return r.text();
+                return r.text().then((t) => {
+                    throw apiError(r.status, t);
+                });
+            });
+        }
+        return gmRequest().catch((e) => {
+            if (e && e.fatal) throw e;
+            return fetchRequest().catch((e2) => {
+                if (e2 && e2.fatal) throw e2;
+                // 两个通道都失败：报出更有信息量的一条
+                throw new Error('网络错误（GM：' + e.message + '；fetch：' + e2.message + '）');
+            });
         });
     }
 
@@ -474,12 +494,12 @@
 
     /* ---------------- 设置面板 ---------------- */
 
-    let btn, panel, statusDot, lastError;
+    let btn, btnLabel, panel, statusDot, lastError;
 
     function setButtonState(state, msgText) {
         if (!btn) return;
         const map = { idle: '译', translating: '译…', done: '译✓', error: '译!' };
-        btn.textContent = map[state] || '译';
+        btnLabel.nodeValue = map[state] || '译';
         if (statusDot) {
             statusDot.style.background = { translating: '#f59e0b', done: '#34d399', error: '#ef4444' }[state] || '#6b7280';
             statusDot.title = msgText || '';
@@ -488,7 +508,8 @@
 
     function buildUI() {
         btn = document.createElement('button');
-        btn.textContent = '译';
+        btnLabel = document.createTextNode('译'); // 用文本节点改字，避免覆盖状态点小圆点
+        btn.appendChild(btnLabel);
         btn.style.cssText =
             'position:fixed;right:16px;bottom:76px;z-index:99998;width:40px;height:40px;border-radius:50%;' +
             'border:1px solid #3b7cd7;background:#1f2430;color:#9db8dd;font-size:14px;cursor:pointer;' +
