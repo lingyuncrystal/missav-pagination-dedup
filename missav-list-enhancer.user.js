@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 列表增强（翻页去重 + 标题重译）
 // @namespace    https://missav.ws/
-// @version      2.0.6
+// @version      2.0.7
 // @description  两个功能合一：1) 翻页去重——列表翻页时服务端常在页边界返回重复影片，自动隐藏；2) 标题修正——默认抓取日文原版标题替换机翻中文，可选填入 Kimi(Moonshot) API Key 升级为大模型重译（演员名保留日文原文）
 // @author       lingyuncrystal
 // @license      MIT
@@ -33,6 +33,7 @@
     function listKey() {
         const u = new URL(location.href);
         u.searchParams.delete('page');
+        u.searchParams.delete('_mve'); // 绕过反爬的缓存破坏参数，不影响列表身份
         return u.pathname + u.search;
     }
 
@@ -165,6 +166,8 @@
         else localStorage.setItem('mve-cache', raw);
     }
 
+    const PROMPT_VERSION = 2; // 提示词版本：变更后旧 zh 译文作废
+
     let config = loadConfig();
     // moonshot-v1 系列与 kimi-k2.5 已于 2026-08-31 全平台下线（404），自动迁移
     if (/^moonshot-v1-/.test(config.model) || config.model === 'kimi-k2.5') {
@@ -172,6 +175,19 @@
         saveConfig(config);
     }
     let cache = loadCache(); // slug -> { ja, zh? }
+    // 提示词升级后丢弃旧译文（日文原标题保留，无需重新抓取）
+    try {
+        const verKey = 'promptVersion';
+        const storedVer = hasGM ? GM_getValue(verKey, 0) : Number(localStorage.getItem('mve-prompt-ver') || 0);
+        if (storedVer !== PROMPT_VERSION) {
+            Object.keys(cache).forEach((k) => {
+                if (cache[k]) delete cache[k].zh;
+            });
+            saveCache(cache);
+            if (hasGM) GM_setValue(verKey, PROMPT_VERSION);
+            else localStorage.setItem('mve-prompt-ver', String(PROMPT_VERSION));
+        }
+    } catch {}
 
     function slugFromHref(href) {
         try {
@@ -370,7 +386,7 @@
     async function translateBatch(jaTitles) {
         const sys =
             '你是日本成人影片标题翻译专家。把用户给出的日文标题数组逐条翻译成自然流畅的简体中文。' +
-            '规则：1) 番号（如 MADV-646）原样保留；2) 演员名字保留日文原文，不要翻译或音译；' +
+            '规则：1) 番号（如 MADV-646）原样保留；2) 演员名字翻译成中文（有通行译名用通行译名，否则按日文读音自然音译，如 天月あず→天月梓、及川うみ→及川海）；' +
             '3) 【4K】[4K] 等标记保留；4) 不要逐字直译，要符合中文表达习惯；' +
             '5) 严格返回 JSON：{"translations": ["...", ...]}，顺序和数量与输入完全一致。';
         const user = JSON.stringify(jaTitles);
@@ -668,6 +684,36 @@
     }
 
     /* ================================================================
+     * 模块零：反爬挑战页自救
+     * 站点偶尔对某个 URL 只返回混淆 JS 验证页（body 极小、无任何内容，
+     * 且验证脚本在部分环境（尤其手机）根本不执行，页面永久空白）。
+     * 实测同一 URL 用 fetch 能拿到正常 HTML，此时用它重写当前文档。
+     * ================================================================ */
+
+    function isChallengePage() {
+        // 验证页：无卡片无 h1、正文几乎无文本、含混淆脚本特征
+        if (document.querySelector('.thumbnail') || document.querySelector('h1')) return false;
+        const text = document.body ? document.body.textContent.trim() : '';
+        const html = document.documentElement.innerHTML;
+        return text.length < 100 && /_0x[0-9a-f]{4,}/i.test(html);
+    }
+
+    function rescueChallengePage() {
+        const check = () =>
+            setTimeout(() => {
+                if (!isChallengePage()) return;
+                const u = new URL(location.href);
+                if (u.searchParams.has('_mve')) return; // 已试过一次，防止循环
+                // 站点的反爬验证按「完整 URL」触发，加一个无用参数即可绕过
+                console.warn('[MissAV 列表增强] 检测到反爬验证空白页，自动绕过…');
+                u.searchParams.set('_mve', Date.now().toString(36));
+                location.replace(u.href);
+            }, 2000);
+        if (document.readyState === 'complete') check();
+        else window.addEventListener('load', check, { once: true });
+    }
+
+    /* ================================================================
      * 启动与监听：先去重，再修正标题；DOM 变化时防抖回写缓存
      * ================================================================ */
 
@@ -682,6 +728,7 @@
     }
 
     function init() {
+        rescueChallengePage();
         let tries = 0;
         const timer = setInterval(() => {
             if (dedup() || ++tries > 20) clearInterval(timer);
