@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 列表增强（翻页去重 + 标题重译）
 // @namespace    https://missav.ws/
-// @version      2.0.2
+// @version      2.0.3
 // @description  两个功能合一：1) 翻页去重——列表翻页时服务端常在页边界返回重复影片，自动隐藏；2) 标题修正——默认抓取日文原版标题替换机翻中文，可选填入 Kimi(Moonshot) API Key 升级为大模型重译（演员名保留日文原文）
 // @author       lingyuncrystal
 // @license      MIT
@@ -343,14 +343,29 @@
             { role: 'system', content: sys },
             { role: 'user', content: user },
         ];
+        // 429 限流自动等待重试（按服务器提示的秒数），最多 3 次
         let text;
-        try {
-            text = await chatCompletion(messages, true);
-        } catch (e) {
-            if (e.status === 400) {
-                // 部分模型/网关不支持 response_format，去掉重试
-                text = await chatCompletion(messages, false);
-            } else {
+        for (let attempt = 0; ; attempt++) {
+            try {
+                try {
+                    text = await chatCompletion(messages, true);
+                } catch (e) {
+                    if (e.status === 400) {
+                        // 部分模型/网关不支持 response_format，去掉重试
+                        text = await chatCompletion(messages, false);
+                    } else {
+                        throw e;
+                    }
+                }
+                break;
+            } catch (e) {
+                if (e.status === 429 && attempt < 3) {
+                    const m = /after (\d+) second/i.exec(e.message || '');
+                    const waitSec = (m ? parseInt(m[1], 10) : 20) + 2;
+                    console.warn('[MissAV 列表增强] 触发限流，' + waitSec + ' 秒后重试（第 ' + (attempt + 1) + ' 次）');
+                    await new Promise((r) => setTimeout(r, waitSec * 1000));
+                    continue;
+                }
                 throw e;
             }
         }
@@ -479,6 +494,8 @@
                 errText += '（模型可能已下线，请在设置中把模型改为 kimi-k2.5 等当前可用模型）';
             } else if (/401|Authentication|auth/i.test(errText)) {
                 errText += '（API Key 无效，请检查设置）';
+            } else if (/429|rate_limit/i.test(errText)) {
+                errText += '（账号请求频率超限：已自动等待重试仍失败，请放慢翻页；你的 Moonshot 账户档位为 3 次/分钟，可在 platform.moonshot.cn 充值提升额度）';
             }
             lastError = errText;
             setButtonState('error', errText);

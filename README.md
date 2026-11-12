@@ -43,7 +43,7 @@ https://missav.com/*
 
 ## 版本
 
-当前版本：**2.0.2**，详见 [CHANGELOG](./CHANGELOG.md)。
+当前版本：**2.0.3**，详见 [CHANGELOG](./CHANGELOG.md)。
 
 ## 发布流程
 
