@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 列表增强（翻页去重 + 标题重译）
 // @namespace    https://missav.ws/
-// @version      2.0.0
+// @version      2.0.1
 // @description  两个功能合一：1) 翻页去重——列表翻页时服务端常在页边界返回重复影片，自动隐藏；2) 标题修正——默认抓取日文原版标题替换机翻中文，可选填入 Kimi(Moonshot) API Key 升级为大模型重译（演员名保留日文原文）
 // @author       lingyuncrystal
 // @license      MIT
@@ -127,7 +127,7 @@
     const DEFAULTS = {
         baseUrl: 'https://api.moonshot.cn/v1',
         apiKey: '',
-        model: 'moonshot-v1-8k',
+        model: 'kimi-k2.5',
         mode: 'ja', // 'ja' = 日文原标题（无需 Key）；'llm' = 大模型重译（需 Key）
         titlesEnabled: true,
     };
@@ -165,6 +165,11 @@
     }
 
     let config = loadConfig();
+    // moonshot-v1 系列已于 2026-08-31 全平台下线（404），自动迁移到当前可用模型
+    if (/^moonshot-v1-/.test(config.model)) {
+        config.model = DEFAULTS.model;
+        saveConfig(config);
+    }
     let cache = loadCache(); // slug -> { ja, zh? }
 
     function slugFromHref(href) {
@@ -347,6 +352,7 @@
     /* ---------------- 页面应用 ---------------- */
 
     let running = false;
+    let rerunAfter = false; // 运行期间又触发了翻译（如用户刚保存设置），结束后补跑一次
 
     function collectCards() {
         const out = [];
@@ -386,7 +392,11 @@
 
     /** 主流程：先取日文标题（每页一次请求），再按模式决定是否调大模型 */
     async function enhanceTitles() {
-        if (!config.titlesEnabled || running) return;
+        if (!config.titlesEnabled) return;
+        if (running) {
+            rerunAfter = true;
+            return;
+        }
         const cards = collectCards().filter((c) => !c.hidden);
         if (!cards.length) return;
 
@@ -440,18 +450,31 @@
                     applyCached(collectCards());
                 }
             }
+            lastError = null;
             setButtonState('done');
         } catch (e) {
             console.warn('[MissAV 列表增强]', e);
-            setButtonState('error', String((e && e.message) || e));
+            let errText = String((e && e.message) || e);
+            if (/404|Not found|not exist/i.test(errText)) {
+                errText += '（模型可能已下线，请在设置中把模型改为 kimi-k2.5 等当前可用模型）';
+            } else if (/401|Authentication|auth/i.test(errText)) {
+                errText += '（API Key 无效，请检查设置）';
+            }
+            lastError = errText;
+            setButtonState('error', errText);
+            if (panel && panel.style.display !== 'none') msg(errText);
         } finally {
             running = false;
+            if (rerunAfter) {
+                rerunAfter = false;
+                setTimeout(enhanceTitles, 500);
+            }
         }
     }
 
     /* ---------------- 设置面板 ---------------- */
 
-    let btn, panel, statusDot;
+    let btn, panel, statusDot, lastError;
 
     function setButtonState(state, msgText) {
         if (!btn) return;
@@ -508,6 +531,7 @@
                 titlesEnabled: panel.querySelector('#mve-enabled').checked,
             };
             saveConfig(config);
+            lastError = null;
             msg('已保存' + (config.mode === 'llm' && !config.apiKey ? '（未填 Key，将显示日文原标题）' : ''));
             togglePanel();
             enhanceTitles();
@@ -534,7 +558,8 @@
             panel.querySelector('#mve-model').value = config.model;
             panel.querySelector(config.mode === 'llm' ? '#mve-mode-llm' : '#mve-mode-ja').checked = true;
             panel.querySelector('#mve-enabled').checked = config.titlesEnabled;
-            msg(config.mode === 'llm' && !config.apiKey ? '重译模式需填 Kimi(Moonshot) API Key' : '');
+            if (lastError) msg('上次出错：' + lastError);
+            else msg(config.mode === 'llm' && !config.apiKey ? '重译模式需填 Kimi(Moonshot) API Key' : '');
         }
     }
 

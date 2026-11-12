@@ -38,12 +38,12 @@ https://missav.com/*
 | --- | --- |
 | 翻页去重 | 从 URL `?page=` 取页码，按「路径 + 查询参数」区分列表；重复卡片 `display: none` 隐藏，`sessionStorage` 会话级存储 |
 | 日文原标题 | 将当前 URL 语言段替换为 `/ja/` 后用隐藏 iframe 加载（站点有 Cloudflare 人机验证，fetch/XHR 拿不到未缓存页面，iframe 让浏览器自己完成验证），解析卡片标题锚点按 slug 映射替换；各语言列表收录范围不同，缺口的番号再逐个抓日文详情页补齐 |
-| 大模型重译 | 兼容 OpenAI 格式的 `/chat/completions`（默认 Kimi `moonshot-v1-8k`），每批 ≤20 条，`response_format` 不支持时自动降级；跳过被去重隐藏的卡片 |
+| 大模型重译 | 兼容 OpenAI 格式的 `/chat/completions`（默认 Kimi `kimi-k2.5`），每批 ≤20 条，`response_format` 不支持时自动降级；跳过被去重隐藏的卡片 |
 | 缓存 | `GM_setValue` 持久缓存 slug → 日文/中文标题；MissAV Plus 重渲染标题时由 MutationObserver 防抖回写 |
 
 ## 版本
 
-当前版本：**2.0.0**，详见 [CHANGELOG](./CHANGELOG.md)。
+当前版本：**2.0.1**，详见 [CHANGELOG](./CHANGELOG.md)。
 
 ## 发布流程
 
