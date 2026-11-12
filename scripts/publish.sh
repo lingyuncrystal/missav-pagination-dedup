@@ -16,11 +16,11 @@
 
 set -euo pipefail
 
-SCRIPT_FILE="missav-pagination-dedup.user.js"
+SCRIPT_FILE="missav-list-enhancer.user.js"
 CHANGELOG_FILE="CHANGELOG.md"
 REMOTE="origin"
 BRANCH="main"
-RAW_URL="https://raw.githubusercontent.com/lingyuncrystal/missav-pagination-dedup/main/missav-pagination-dedup.user.js"
+RAW_URL="https://raw.githubusercontent.com/lingyuncrystal/missav-pagination-dedup/main/missav-list-enhancer.user.js"
 
 cd "$(dirname "$0")/.."
 
