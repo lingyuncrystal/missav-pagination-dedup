@@ -1,5 +1,9 @@
 # Changelog
 
+## [2.0.4] - 2026-11-12
+
+- 修复 API 400「invalid temperature」：kimi 新一代模型只允许 temperature=1，移除请求中的 temperature 参数，改用服务端默认值
+
 ## [2.0.3] - 2026-11-12
 
 - 429 限流自动等待重试：按服务器提示的秒数等待后重发（最多 3 次），应对 Moonshot 低档位账户 3 RPM 限制

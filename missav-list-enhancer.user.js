@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 列表增强（翻页去重 + 标题重译）
 // @namespace    https://missav.ws/
-// @version      2.0.3
+// @version      2.0.4
 // @description  两个功能合一：1) 翻页去重——列表翻页时服务端常在页边界返回重复影片，自动隐藏；2) 标题修正——默认抓取日文原版标题替换机翻中文，可选填入 Kimi(Moonshot) API Key 升级为大模型重译（演员名保留日文原文）
 // @author       lingyuncrystal
 // @license      MIT
@@ -265,7 +265,7 @@
         const body = {
             model: config.model,
             messages,
-            temperature: 0.3,
+            // 不传 temperature：kimi 新一代模型（k2.5 等）只允许 temperature=1，传 0.3 会报 400
         };
         if (useJsonFormat) body.response_format = { type: 'json_object' };
         const payload = JSON.stringify(body);
