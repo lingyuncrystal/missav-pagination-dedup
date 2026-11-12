@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 列表增强（翻页去重 + 标题重译）
 // @namespace    https://missav.ws/
-// @version      2.0.4
+// @version      2.0.5
 // @description  两个功能合一：1) 翻页去重——列表翻页时服务端常在页边界返回重复影片，自动隐藏；2) 标题修正——默认抓取日文原版标题替换机翻中文，可选填入 Kimi(Moonshot) API Key 升级为大模型重译（演员名保留日文原文）
 // @author       lingyuncrystal
 // @license      MIT
@@ -127,8 +127,9 @@
     const DEFAULTS = {
         baseUrl: 'https://api.moonshot.cn/v1',
         apiKey: '',
-        model: 'kimi-k2.5',
+        model: 'kimi-k2.6',
         mode: 'ja', // 'ja' = 日文原标题（无需 Key）；'llm' = 大模型重译（需 Key）
+        showButton: true, // 右下角浮动「译」按钮
         titlesEnabled: true,
     };
 
@@ -165,8 +166,8 @@
     }
 
     let config = loadConfig();
-    // moonshot-v1 系列已于 2026-08-31 全平台下线（404），自动迁移到当前可用模型
-    if (/^moonshot-v1-/.test(config.model)) {
+    // moonshot-v1 系列与 kimi-k2.5 已于 2026-08-31 全平台下线（404），自动迁移
+    if (/^moonshot-v1-/.test(config.model) || config.model === 'kimi-k2.5') {
         config.model = DEFAULTS.model;
         saveConfig(config);
     }
@@ -331,6 +332,37 @@
         });
     }
 
+    /** 拉取账号可用模型列表，按优先级自动挑选一个（应对官方模型阵容调整） */
+    async function discoverModel() {
+        const url = config.baseUrl.replace(/\/+$/, '') + '/models';
+        const headers = { Authorization: 'Bearer ' + config.apiKey };
+        let text;
+        if (typeof GM_xmlhttpRequest === 'function') {
+            text = await new Promise((resolve, reject) => {
+                GM_xmlhttpRequest({
+                    method: 'GET',
+                    url,
+                    headers,
+                    timeout: 30000,
+                    onload: (r) => (r.status >= 200 && r.status < 300 ? resolve(r.responseText) : reject(new Error('models API ' + r.status))),
+                    onerror: () => reject(new Error('models 网络错误')),
+                    ontimeout: () => reject(new Error('models 超时')),
+                });
+            });
+        } else {
+            const r = await fetch(url, { headers });
+            if (!r.ok) throw new Error('models API ' + r.status);
+            text = await r.text();
+        }
+        const ids = ((JSON.parse(text).data || []).map((m) => m.id)).filter(Boolean);
+        const prefs = [/^kimi-k2\.6/, /^kimi-k3/, /^kimi-latest/, /^kimi-k2/, /kimi/i];
+        for (const re of prefs) {
+            const hit = ids.find((id) => re.test(id));
+            if (hit) return hit;
+        }
+        return ids[0] || null;
+    }
+
     /** 批量翻译日文标题，返回与输入同序的中文数组；response_format 不被支持时自动降级重试 */
     async function translateBatch(jaTitles) {
         const sys =
@@ -343,8 +375,10 @@
             { role: 'system', content: sys },
             { role: 'user', content: user },
         ];
-        // 429 限流自动等待重试（按服务器提示的秒数），最多 3 次
+        // 429 限流自动等待重试（按服务器提示的秒数），最多 3 次；
+        // 404（模型下线）自动用 /models 发现可用模型并重试一次
         let text;
+        let modelSwitched = false;
         for (let attempt = 0; ; attempt++) {
             try {
                 try {
@@ -359,6 +393,20 @@
                 }
                 break;
             } catch (e) {
+                if (e.status === 404 && !modelSwitched) {
+                    modelSwitched = true;
+                    try {
+                        const m = await discoverModel();
+                        if (m && m !== config.model) {
+                            console.warn('[MissAV 列表增强] 模型 ' + config.model + ' 不可用，自动切换为 ' + m);
+                            config.model = m;
+                            saveConfig(config);
+                            continue;
+                        }
+                    } catch (e2) {
+                        console.warn('[MissAV 列表增强] 模型自动发现失败', e2);
+                    }
+                }
                 if (e.status === 429 && attempt < 3) {
                     const m = /after (\d+) second/i.exec(e.message || '');
                     const waitSec = (m ? parseInt(m[1], 10) : 20) + 2;
@@ -491,7 +539,7 @@
             console.warn('[MissAV 列表增强]', e);
             let errText = String((e && e.message) || e);
             if (/404|Not found|not exist/i.test(errText)) {
-                errText += '（模型可能已下线，请在设置中把模型改为 kimi-k2.5 等当前可用模型）';
+                errText += '（模型不可用或已下线：已尝试自动切换可用模型，仍失败请在设置中手动修改模型名）';
             } else if (/401|Authentication|auth/i.test(errText)) {
                 errText += '（API Key 无效，请检查设置）';
             } else if (/429|rate_limit/i.test(errText)) {
@@ -536,6 +584,7 @@
             'position:absolute;top:-2px;right:-2px;width:10px;height:10px;border-radius:50%;background:#6b7280;';
         btn.appendChild(statusDot);
         btn.addEventListener('click', togglePanel);
+        if (!config.showButton) btn.style.display = 'none';
         document.body.appendChild(btn);
 
         panel = document.createElement('div');
@@ -553,6 +602,7 @@
             '<label style="display:block;margin-bottom:6px">API Key<br><input id="mve-key" type="password" placeholder="sk-...（Moonshot/Kimi）" style="width:100%;margin-top:2px;padding:5px;border-radius:6px;border:1px solid #4c566a;background:#2e3440;color:#eceff4"></label>' +
             '<label style="display:block;margin-bottom:6px">模型<br><input id="mve-model" style="width:100%;margin-top:2px;padding:5px;border-radius:6px;border:1px solid #4c566a;background:#2e3440;color:#eceff4"></label>' +
             '<label style="display:flex;align-items:center;gap:6px;margin:8px 0"><input id="mve-enabled" type="checkbox"> 启用标题修正</label>' +
+            '<label style="display:flex;align-items:center;gap:6px;margin:8px 0"><input id="mve-showbtn" type="checkbox"> 显示右下角「译」按钮（隐藏后可用脚本菜单打开本设置）</label>' +
             '<div style="display:flex;gap:8px;margin-top:8px">' +
             '<button id="mve-save" style="flex:1;padding:6px;border:none;border-radius:6px;background:#3b7cd7;color:#fff;cursor:pointer">保存并应用</button>' +
             '<button id="mve-clear" style="padding:6px 10px;border:1px solid #4c566a;border-radius:6px;background:transparent;color:#d7dee9;cursor:pointer">清缓存</button>' +
@@ -567,7 +617,9 @@
                 model: panel.querySelector('#mve-model').value.trim() || DEFAULTS.model,
                 mode: panel.querySelector('#mve-mode-llm').checked ? 'llm' : 'ja',
                 titlesEnabled: panel.querySelector('#mve-enabled').checked,
+                showButton: panel.querySelector('#mve-showbtn').checked,
             };
+            btn.style.display = config.showButton ? '' : 'none';
             saveConfig(config);
             lastError = null;
             msg('已保存' + (config.mode === 'llm' && !config.apiKey ? '（未填 Key，将显示日文原标题）' : ''));
@@ -596,6 +648,7 @@
             panel.querySelector('#mve-model').value = config.model;
             panel.querySelector(config.mode === 'llm' ? '#mve-mode-llm' : '#mve-mode-ja').checked = true;
             panel.querySelector('#mve-enabled').checked = config.titlesEnabled;
+            panel.querySelector('#mve-showbtn').checked = config.showButton;
             if (lastError) msg('上次出错：' + lastError);
             else msg(config.mode === 'llm' && !config.apiKey ? '重译模式需填 Kimi(Moonshot) API Key' : '');
         }
