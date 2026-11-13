@@ -1,5 +1,9 @@
 # Changelog
 
+## [4.0.2] - 2026-11-13
+
+- @author 更名为 Phaeton
+
 ## [4.0.1] - 2026-11-13
 
 - **修复脚本在 missav.ai 上不运行的问题**：MissAV 主站域名已迁至 missav.ai，而旧 @match 只覆盖 missav.ws / missav.com，导致 Tampermonkey 在新域名下完全不注入脚本（表现为脚本「消失」，实为未运行）。新增 `@match https://missav.ai/*`，并增加 `@include` 正则兜底所有 `missav.<TLD>` 域名变体，日后再换后缀也无需发版
