@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      4.0.11
+// @version      4.0.12
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、列表页标题放大、订阅页网格卡片（原 GetAV 脚本并入）；6) Jable 标题完整显示不省略（同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -701,13 +701,17 @@
      * 对每个未命中番号重复发注定失败的请求。不写持久标记：CF 按 IP/网络
      * 环境触发，换网络后可能恢复，下次会话自动重试。 */
 
-    let jableBlocked = false; // 会话级停用标记；同时镜像到 <html> dataset 便于诊断/测试读取
+    let jableBlocked = false;   // 会话级停用标记；同时镜像到 <html> dataset 便于诊断/测试读取
+    let jableBlockReason = '';  // 停用原因（CF 拦截 / 连续网络失败），诊断面板展示
+    let jableNetFails = 0;      // 连续失败计数：移动端 GM_xhr 常在网络层直接失败（收不到 403 响应），
+    const JABLE_MAX_NET_FAILS = 3; // 连续 3 次失败同样判定为本环境不可用，避免每页重复发无效请求
 
-    function markJableBlocked() {
+    function markJableBlocked(reason) {
         if (jableBlocked) return;
         jableBlocked = true;
-        document.documentElement.dataset.mveJableBlocked = '1';
-        log('Jable 查询被 Cloudflare 人机验证拦截，本会话停用 Jable 层（中文标题降级为大模型兜底）');
+        jableBlockReason = reason;
+        document.documentElement.dataset.mveJableBlocked = reason;
+        log('Jable 查询不可用（' + reason + '），本会话停用 Jable 层（中文标题降级为大模型兜底）');
     }
 
     /** 判断响应是否为 Cloudflare 人机验证挑战页 */
@@ -731,7 +735,7 @@
     /**
      * 按番号查 Jable 官方中文标题。命中返回标题文本；未收录返回 null 并写负缓存；
      * 网络失败 / 异常页面返回 null 但【不写】负缓存（下次重试）；
-     * CF 拦截返回 null 并停用本会话的 Jable 层。
+     * CF 拦截或连续网络失败达到阈值，返回 null 并停用本会话的 Jable 层。
      */
     async function fetchJableTitle(slug) {
         if (jableBlocked) return null;
@@ -741,15 +745,27 @@
             const r = await httpGet('https://jable.tv/videos/' + encodeURIComponent(slug) + '/');
             if (r.status < 200 || r.status >= 300) {
                 if (isCfChallenge(r)) {
-                    markJableBlocked();
+                    markJableBlocked('Cloudflare 人机验证拦截');
                 } else if (r.status === 404) {
+                    // 404 = 网络链路正常（服务器明确应答），重置失败计数
+                    jableNetFails = 0;
                     cache[slug] = Object.assign(cache[slug] || {}, { jableMiss: Date.now() });
+                } else if (++jableNetFails >= JABLE_MAX_NET_FAILS) {
+                    // 5xx 等持续异常也计入熔断，避免对故障中的服务器反复请求
+                    markJableBlocked('连续 ' + jableNetFails + ' 次请求失败（HTTP ' + r.status + '）');
                 }
                 return null;
             }
+            jableNetFails = 0; // 2xx：链路正常，重置计数
             return parseJableTitle(r.text, slug) || null;
         } catch (e) {
-            log('Jable 查询失败 ' + slug, e);
+            // 网络层失败（部分移动脚本管理器的 GM_xhr 到 CF 站点直接走不到响应）
+            jableNetFails++;
+            if (jableNetFails >= JABLE_MAX_NET_FAILS) {
+                markJableBlocked('连续 ' + jableNetFails + ' 次网络失败');
+            } else {
+                log('Jable 查询失败 ' + slug, e);
+            }
             return null;
         }
     }
@@ -1505,7 +1521,7 @@
             try {
                 const r = await httpGet('https://jable.tv/videos/jur-857/');
                 if (isCfChallenge(r)) {
-                    markJableBlocked();
+                    markJableBlocked('Cloudflare 人机验证拦截');
                     lines[lines.length - 1] = 'Jable 查询：✗ HTTP 403——Cloudflare 人机验证拦截（本环境的 GM_xhr 过不了 CF，属环境限制非脚本故障；Jable 层本会话已自动停用，中文标题由其他来源兜底）';
                 } else {
                     const t = parseJableTitle(r.text, 'jur-857');
@@ -1514,10 +1530,12 @@
                            : '，但解析不到合规标题（异常页面，前 100 字：' + r.text.slice(0, 100).replace(/\s+/g, ' ') + '）');
                 }
             } catch (e) {
-                lines[lines.length - 1] = 'Jable 查询：✗ 失败——' + e.message;
+                // 网络层失败（移动端常见）：单次不熔断，但提示这同样属于环境限制
+                lines[lines.length - 1] = 'Jable 查询：✗ 失败——' + e.message +
+                    '（本环境的 GM_xhr 无法连通 jable.tv，多为 Cloudflare 对脚本管理器请求的限制，属环境限制非脚本故障；连续失败 ' + JABLE_MAX_NET_FAILS + ' 次后 Jable 层会自动停用）';
             }
             out.textContent = lines.join('\n');
-            add('Jable 层状态', jableBlocked ? '本会话已停用（Cloudflare 拦截）' : '正常');
+            add('Jable 层状态', jableBlocked ? '本会话已停用（' + jableBlockReason + '）' : '正常');
         }
         if (SITE === 'missav') {
             add('日文页抓取', '测试中…');
