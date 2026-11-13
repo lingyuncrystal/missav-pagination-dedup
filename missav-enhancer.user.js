@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      3.4.0
+// @version      3.4.1
 // @description  MissAV 四合一 + Jable 标题增强：1) 翻页去重——列表翻页时服务端常在页边界返回重复影片，自动隐藏；2) 标题修正——MissAV 抓取日文原版标题替换机翻中文，可选填大模型 API Key 升级为重译（内置 Kimi/DeepSeek/OpenAI/GLM 预设）；Jable 中文标题自动在封面加「字幕」标识，非中文标题大模型翻译为中文；3) 片单网格化——播放列表页改造为分类页同款缩略图网格卡片；4) 预览独占——手机端点卡片看预览时，自动暂停上一个预览视频，同时只播一个
 // @author       lingyuncrystal
 // @license      MIT
@@ -355,12 +355,18 @@
      * 就在当前页 DOM（无需抓镜像页），llm 模式下大模型翻译为中文。
      * ================================================================ */
 
+    // 预设核对日期 2026-11-13（官方文档/变更日志逐一查证）：
+    // - kimi-k2.6 在现行模型列表（k3 始终推理、不适合翻译；k2.6 可关思考提速）
+    // - deepseek-chat / deepseek-reasoner 已于 2026-07-24 停用，现行为 v4-flash / v4-pro
+    // - gpt-4o-mini 目前可调，但官方已公告 2027-01-14 退役——届时 404 自动发现机制接管
+    // - glm-4.7-flash 为现行免费款（glm-4.5-flash 已下线并自动路由到 4.7-flash）
+    // modelPrefs：/models 自动发现时的挑选优先级（正则按序匹配），服务商专属
     const PROVIDERS = [
-        { id: 'kimi', name: 'Kimi（Moonshot）', baseUrl: 'https://api.moonshot.cn/v1', model: 'kimi-k2.6', keyHint: 'platform.moonshot.cn' },
-        { id: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', keyHint: 'platform.deepseek.com' },
-        { id: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini', keyHint: 'platform.openai.com' },
-        { id: 'glm', name: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash', keyHint: 'open.bigmodel.cn' },
-        { id: 'custom', name: '自定义…', baseUrl: '', model: '', keyHint: '' },
+        { id: 'kimi', name: 'Kimi（Moonshot）', baseUrl: 'https://api.moonshot.cn/v1', model: 'kimi-k2.6', keyHint: 'platform.kimi.com', modelPrefs: [/^kimi-k2\.6$/, /^kimi-k2\./, /^kimi-k3/, /^kimi/] },
+        { id: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-v4-flash', keyHint: 'platform.deepseek.com', modelPrefs: [/^deepseek-v4-flash$/, /^deepseek-v4/, /^deepseek/] },
+        { id: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini', keyHint: 'platform.openai.com', modelPrefs: [/^gpt-4o-mini$/, /mini/i, /^gpt-4o$/, /^gpt-/] },
+        { id: 'glm', name: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4.7-flash', keyHint: 'open.bigmodel.cn', modelPrefs: [/^glm-4\.7-flash$/i, /flash/i, /^glm-4\./i, /^glm-/i] },
+        { id: 'custom', name: '自定义…', baseUrl: '', model: '', keyHint: '', modelPrefs: [] },
     ];
 
     const DEFAULTS = {
@@ -418,6 +424,23 @@
     const normUrl = (u) => String(u || '').replace(/\/+$/, '');
     const matchedPreset = PROVIDERS.find((p) => p.id !== 'custom' && normUrl(p.baseUrl) === normUrl(config.baseUrl));
     config.provider = matchedPreset ? matchedPreset.id : 'custom';
+    // 已停用/下线模型名自动迁移（官方公告日期见 PROVIDERS 注释）。
+    // 按服务商限定：自定义网关用户恰好用同名模型时不受打扰
+    const MODEL_MIGRATIONS = {
+        deepseek: {
+            'deepseek-chat': 'deepseek-v4-flash', // 2026-07-24 停用
+            'deepseek-reasoner': 'deepseek-v4-flash',
+        },
+        glm: {
+            'glm-4-flash': 'glm-4.7-flash', // 旧款免费模型，已由 4.7-flash 接替
+            'glm-4.5-flash': 'glm-4.7-flash', // 2026-01-30 下线（官方自动路由，这里直接改干净）
+        },
+    };
+    const providerMigrations = MODEL_MIGRATIONS[config.provider];
+    if (providerMigrations && providerMigrations[config.model]) {
+        config.model = providerMigrations[config.model];
+        saveConfig(config);
+    }
     // moonshot-v1 系列与 kimi-k2.5 已于 2026-08-31 全平台下线（404），自动迁移
     if (/^moonshot-v1-/.test(config.model) || config.model === 'kimi-k2.5') {
         config.model = DEFAULTS.model;
@@ -626,12 +649,16 @@
             text = await r.text();
         }
         const ids = ((JSON.parse(text).data || []).map((m) => m.id)).filter(Boolean);
-        const prefs = [/^kimi-k2\.6/, /^kimi-k3/, /^kimi-latest/, /^kimi-k2/, /kimi/i];
+        // 先排除明显不能对话的模型（向量/语音/图像/审核等），避免兜底挑错类型
+        const chatIds = ids.filter((id) => !/embed|tts|whisper|dall-e|image|ocr|moderation|asr|transcri|cogview|cogvideo/i.test(id));
+        // 按当前服务商的偏好表挑选（自定义服务商无偏好，退化为第一个对话模型）
+        const provider = PROVIDERS.find((p) => p.id === config.provider);
+        const prefs = (provider && provider.modelPrefs) || [];
         for (const re of prefs) {
-            const hit = ids.find((id) => re.test(id));
+            const hit = chatIds.find((id) => re.test(id));
             if (hit) return hit;
         }
-        return ids[0] || null;
+        return chatIds[0] || ids[0] || null;
     }
 
     /** 批量翻译日文标题，返回与输入同序的中文数组；response_format 不被支持时自动降级重试 */
@@ -1089,7 +1116,7 @@
     function exportBackup() {
         const data = {
             app: 'missav-enhancer',
-            version: '3.4.0',
+            version: '3.4.1',
             exportedAt: new Date().toISOString(),
             config,
             cache,

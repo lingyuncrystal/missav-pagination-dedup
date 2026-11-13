@@ -1,5 +1,11 @@
 # Changelog
 
+## [3.4.1] - 2026-11-13
+
+- 修正大模型预设（逐一核对官方文档）：DeepSeek 默认模型由已停用的 `deepseek-chat`（2026-07-24 官方停用）改为 `deepseek-v4-flash`；智谱 GLM 由旧款 `glm-4-flash` 改为现行免费款 `glm-4.7-flash`；Kimi Key 申请地址更新为 platform.kimi.com（platform.moonshot.cn 已 301 跳转至此）
+- 旧配置自动迁移：按服务商把已停用模型名（deepseek-chat / deepseek-reasoner / glm-4-flash / glm-4.5-flash）升级为现行型号，自定义服务商配置不受影响
+- 404 自动发现模型机制按服务商定制挑选优先级（PROVIDERS 新增 modelPrefs），并排除向量/语音/图像等非对话模型，避免多服务商场景下兜底挑到错误或过贵的型号
+
 ## [3.4.0] - 2026-11-13
 
 - 新增「大模型服务预设」：设置面板内置 Kimi（Moonshot）/ DeepSeek / OpenAI / 智谱 GLM 四个常用预设，下拉选择后 API 地址与默认模型自动填好，只需粘贴 Key；「自定义…」保留手填入口（OpenAI 兼容接口）。旧配置按已存 baseUrl 自动反推归类，无损迁移
