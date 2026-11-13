@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      3.3.1
-// @description  四合一：1) 翻页去重——列表翻页时服务端常在页边界返回重复影片，自动隐藏；2) 标题修正——默认抓取日文原版标题替换机翻中文，可选填入 Kimi(Moonshot) API Key 升级为大模型重译（演员名保留日文读音自然音译）；3) 片单网格化——播放列表页改造为分类页同款缩略图网格卡片；4) 预览独占——手机端点卡片看预览时，自动暂停上一个预览视频，同时只播一个
+// @version      3.4.0
+// @description  MissAV 四合一 + Jable 标题增强：1) 翻页去重——列表翻页时服务端常在页边界返回重复影片，自动隐藏；2) 标题修正——MissAV 抓取日文原版标题替换机翻中文，可选填大模型 API Key 升级为重译（内置 Kimi/DeepSeek/OpenAI/GLM 预设）；Jable 中文标题自动在封面加「字幕」标识，非中文标题大模型翻译为中文；3) 片单网格化——播放列表页改造为分类页同款缩略图网格卡片；4) 预览独占——手机端点卡片看预览时，自动暂停上一个预览视频，同时只播一个
 // @author       lingyuncrystal
 // @license      MIT
 // @icon         https://missav.ws/favicon.ico
@@ -10,6 +10,7 @@
 // @downloadURL  https://raw.githubusercontent.com/lingyuncrystal/missav-pagination-dedup/main/missav-enhancer.user.js
 // @match        https://missav.ws/*
 // @match        https://missav.com/*
+// @match        https://jable.tv/*
 // @run-at       document-idle
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -28,6 +29,9 @@
      * ================================================================ */
 
     const LOG_PREFIX = '[MissAV 综合增强]';
+
+    /** 站点识别：rescue/grid/dedup/preview 是 MissAV 专属；titles 与设置面板两站共用 */
+    const SITE = /(^|\.)jable\.tv$/i.test(location.hostname) ? 'jable' : 'missav';
 
     /** 统一日志（用 warn 级别，普通控制台过滤 info 时仍可见） */
     function log(...args) {
@@ -344,10 +348,23 @@
     }
 
     /* ================================================================
-     * 模块五 titles：标题修正（日文原标题 / Kimi 大模型重译）
+     * 模块五 titles：标题修正（日文原标题 / 大模型重译）
+     * 大模型服务商预设见 PROVIDERS：选中即自动填好地址与默认模型，
+     * 用户只需粘贴 Key；「自定义」保留手填入口（OpenAI 兼容接口）。
+     * Jable 走独立流程：中文原标题封面加「字幕」徽章，日文原标题
+     * 就在当前页 DOM（无需抓镜像页），llm 模式下大模型翻译为中文。
      * ================================================================ */
 
+    const PROVIDERS = [
+        { id: 'kimi', name: 'Kimi（Moonshot）', baseUrl: 'https://api.moonshot.cn/v1', model: 'kimi-k2.6', keyHint: 'platform.moonshot.cn' },
+        { id: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', keyHint: 'platform.deepseek.com' },
+        { id: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini', keyHint: 'platform.openai.com' },
+        { id: 'glm', name: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash', keyHint: 'open.bigmodel.cn' },
+        { id: 'custom', name: '自定义…', baseUrl: '', model: '', keyHint: '' },
+    ];
+
     const DEFAULTS = {
+        provider: 'kimi', // 大模型服务预设；custom 时用手填的 baseUrl/model
         baseUrl: 'https://api.moonshot.cn/v1',
         apiKey: '',
         model: 'kimi-k2.6',
@@ -395,6 +412,12 @@
     const PROMPT_VERSION = 2; // 提示词版本：变更后旧 zh 译文作废
 
     let config = loadConfig();
+    // provider 由 baseUrl 反推确定（而不是信任存储值）：旧配置没有 provider
+    // 字段会被 DEFAULTS 填成 'kimi'，反推能把它修正为真正匹配的服务商；
+    // 推不出（手填地址）一律视为 custom，手填内容原样保留
+    const normUrl = (u) => String(u || '').replace(/\/+$/, '');
+    const matchedPreset = PROVIDERS.find((p) => p.id !== 'custom' && normUrl(p.baseUrl) === normUrl(config.baseUrl));
+    config.provider = matchedPreset ? matchedPreset.id : 'custom';
     // moonshot-v1 系列与 kimi-k2.5 已于 2026-08-31 全平台下线（404），自动迁移
     if (/^moonshot-v1-/.test(config.model) || config.model === 'kimi-k2.5') {
         config.model = DEFAULTS.model;
@@ -685,7 +708,128 @@
     let running = false;
     let rerunAfter = false; // 运行期间又触发了翻译（如用户刚保存设置），结束后补跑一次
 
+    /* ---------------- Jable：中文标题加「字幕」徽章，非中文大模型翻译 ---------------- */
+
+    // 中日文判定：含平/片假名 ⇒ 日文；只有汉字没有假名 ⇒ 中文（Jable 中文标题为繁体）
+    const KANA_RE = /[぀-ヿ]/;
+    const HAN_RE = /[一-鿿]/;
+
+    function classifyTitle(t) {
+        if (KANA_RE.test(t)) return 'ja';
+        if (HAN_RE.test(t)) return 'cn';
+        return 'other';
+    }
+
+    /** Jable 卡片：h6.title 里的番号链接 + 同卡 .video-img-box 封面容器 */
+    function collectJableCards() {
+        const out = [];
+        document.querySelectorAll('h6.title a[href*="/videos/"]').forEach((anchor) => {
+            const slug = slugFromHref(anchor.href);
+            if (!slug) return;
+            out.push({ slug, anchor, box: anchor.closest('.video-img-box'), hidden: false });
+        });
+        return out;
+    }
+
+    /** 封面左上角加「字幕」标识（插进站内覆盖层所在的 <a>，与时长标同级） */
+    function ensureSubBadge(box) {
+        if (!box || box.dataset.mveSub === '1') return;
+        const a = box.querySelector('.img-box a[href]');
+        if (!a) return;
+        if (getComputedStyle(a).position === 'static') a.style.position = 'relative';
+        const badge = document.createElement('div');
+        badge.textContent = '字幕';
+        badge.style.cssText =
+            'position:absolute;top:6px;left:6px;z-index:5;padding:2px 7px;' +
+            'border-radius:4px;background:rgba(210,40,60,.92);color:#fff;' +
+            'font-size:12px;font-weight:600;line-height:1.4;pointer-events:none;';
+        a.appendChild(badge);
+        box.dataset.mveSub = '1';
+    }
+
+    /**
+     * Jable 无需网络的 DOM 处理（初始化与 MutationObserver 回调共用）：
+     * 1) 日文原文记入缓存——中文原文【不入】缓存，否则同番号回到 MissAV
+     *    时会把中文标题当成「日文原标题」展示，污染两站共用的缓存；
+     * 2) 中文原标题的卡片封面加「字幕」徽章；
+     * 3) 缓存命中回写（llm 模式译文 / ja 模式还原原文）。
+     * 注意：翻译后 DOM 显示的是中文译文，语言分类必须读缓存里的原文，
+     * 只有缓存没有记录时才看 DOM 文本。
+     */
+    function processJableDom() {
+        const cards = collectJableCards();
+        let changed = false;
+        cards.forEach(({ slug, anchor, box }) => {
+            if (cache[slug] && cache[slug].ja) return; // 已有原文记录（必为日文）
+            const orig = anchor.textContent.trim();
+            const lang = classifyTitle(orig);
+            if (lang === 'cn') {
+                ensureSubBadge(box);
+            } else if (lang === 'ja') {
+                cache[slug] = Object.assign(cache[slug] || {}, { ja: orig });
+                changed = true;
+            }
+        });
+        if (changed) saveCache(cache);
+        applyCached(cards);
+        return cards;
+    }
+
+    /** Jable 主流程：原标题就在当前页 DOM，无需抓镜像页，只需大模型翻译 */
+    async function enhanceJableTitles() {
+        if (running) {
+            rerunAfter = true;
+            return;
+        }
+        const cards = processJableDom();
+        if (!cards.length) return;
+        running = true;
+        setButtonState('translating');
+        try {
+            if (config.mode === 'llm' && config.apiKey) {
+                const todo = [...new Set(cards.map((c) => c.slug))]
+                    .filter((s) => cache[s] && cache[s].ja && !cache[s].zh);
+                for (let i = 0; i < todo.length; i += 20) {
+                    const chunk = todo.slice(i, i + 20);
+                    const zhArr = await translateBatch(chunk.map((s) => cache[s].ja));
+                    chunk.forEach((s, j) => {
+                        cache[s].zh = zhArr[j];
+                    });
+                    saveCache(cache);
+                    applyCached(collectJableCards());
+                }
+            }
+            lastError = null;
+            setButtonState('done');
+        } catch (e) {
+            log(e);
+            lastError = describeTitleError(e);
+            setButtonState('error', lastError);
+            if (panel && panel.style.display !== 'none') msg(lastError);
+        } finally {
+            running = false;
+            if (rerunAfter) {
+                rerunAfter = false;
+                setTimeout(enhanceTitles, 500);
+            }
+        }
+    }
+
+    /** 把翻译/抓取异常映射成用户可读的说明（MissAV 与 Jable 流程共用） */
+    function describeTitleError(e) {
+        let errText = String((e && e.message) || e);
+        if (/404|Not found|not exist/i.test(errText)) {
+            errText += '（模型不可用或已下线：已尝试自动切换可用模型，仍失败请在设置中手动修改模型名）';
+        } else if (/401|Authentication|auth/i.test(errText)) {
+            errText += '（API Key 无效，请检查设置）';
+        } else if (/429|rate_limit/i.test(errText)) {
+            errText += '（账号请求频率超限：已自动等待重试仍失败，请放慢翻页；如持续触发，可到对应大模型平台充值提升额度）';
+        }
+        return errText;
+    }
+
     function collectCards() {
+        if (SITE === 'jable') return collectJableCards();
         const out = [];
         document.querySelectorAll('.thumbnail').forEach((thumb) => {
             const anchor = thumb.parentElement.querySelector('.my-2 a[href], a.mv-full-title[href]') ||
@@ -724,6 +868,7 @@
     /** 主流程：先取日文标题（每页一次请求），再按模式决定是否调大模型 */
     async function enhanceTitles() {
         if (!config.titlesEnabled) return;
+        if (SITE === 'jable') return enhanceJableTitles();
         if (running) {
             rerunAfter = true;
             return;
@@ -801,17 +946,9 @@
             setButtonState('done');
         } catch (e) {
             log(e);
-            let errText = String((e && e.message) || e);
-            if (/404|Not found|not exist/i.test(errText)) {
-                errText += '（模型不可用或已下线：已尝试自动切换可用模型，仍失败请在设置中手动修改模型名）';
-            } else if (/401|Authentication|auth/i.test(errText)) {
-                errText += '（API Key 无效，请检查设置）';
-            } else if (/429|rate_limit/i.test(errText)) {
-                errText += '（账号请求频率超限：已自动等待重试仍失败，请放慢翻页；你的 Moonshot 账户档位为 3 次/分钟，可在 platform.moonshot.cn 充值提升额度）';
-            }
-            lastError = errText;
-            setButtonState('error', errText);
-            if (panel && panel.style.display !== 'none') msg(errText);
+            lastError = describeTitleError(e);
+            setButtonState('error', lastError);
+            if (panel && panel.style.display !== 'none') msg(lastError);
         } finally {
             running = false;
             if (rerunAfter) {
@@ -859,14 +996,21 @@
             'background:#1f2430;border:1px solid #3b7cd7;color:#d7dee9;font-size:13px;display:none;' +
             'box-shadow:0 4px 20px rgba(0,0,0,.6);';
         panel.innerHTML =
-            '<div style="font-weight:600;margin-bottom:10px">MissAV 综合增强设置</div>' +
+            '<div style="font-weight:600;margin-bottom:10px">' + (SITE === 'jable' ? 'Jable 标题增强设置' : 'MissAV 综合增强设置') + '</div>' +
             '<div style="margin-bottom:8px">' +
             '<label style="display:flex;align-items:center;gap:6px;margin-bottom:4px"><input type="radio" name="mve-mode" id="mve-mode-ja" value="ja"> 日文原标题（无需 Key）</label>' +
-            '<label style="display:flex;align-items:center;gap:6px"><input type="radio" name="mve-mode" id="mve-mode-llm" value="llm"> 大模型重译（需 Kimi Key）</label>' +
+            '<label style="display:flex;align-items:center;gap:6px"><input type="radio" name="mve-mode" id="mve-mode-llm" value="llm"> 大模型重译（需 API Key）</label>' +
             '</div>' +
+            '<label style="display:block;margin-bottom:2px">大模型服务<br><select id="mve-provider" style="width:100%;margin-top:2px;padding:5px;border-radius:6px;border:1px solid #4c566a;background:#2e3440;color:#eceff4">' +
+            PROVIDERS.map((p) => '<option value="' + p.id + '">' + p.name + '</option>').join('') +
+            '</select></label>' +
+            '<div id="mve-key-hint" style="margin:0 0 6px;font-size:11px;color:#8b93a5"></div>' +
+            '<label style="display:block;margin-bottom:6px">API Key<br><input id="mve-key" type="password" placeholder="sk-..." style="width:100%;margin-top:2px;padding:5px;border-radius:6px;border:1px solid #4c566a;background:#2e3440;color:#eceff4"></label>' +
+            // 选「自定义」才展开的手填区；预设服务商的地址/模型由 PROVIDERS 提供
+            '<div id="mve-custom-fields" style="display:none">' +
             '<label style="display:block;margin-bottom:6px">API 地址<br><input id="mve-base" style="width:100%;margin-top:2px;padding:5px;border-radius:6px;border:1px solid #4c566a;background:#2e3440;color:#eceff4"></label>' +
-            '<label style="display:block;margin-bottom:6px">API Key<br><input id="mve-key" type="password" placeholder="sk-...（Moonshot/Kimi）" style="width:100%;margin-top:2px;padding:5px;border-radius:6px;border:1px solid #4c566a;background:#2e3440;color:#eceff4"></label>' +
             '<label style="display:block;margin-bottom:6px">模型<br><input id="mve-model" style="width:100%;margin-top:2px;padding:5px;border-radius:6px;border:1px solid #4c566a;background:#2e3440;color:#eceff4"></label>' +
+            '</div>' +
             '<label style="display:flex;align-items:center;gap:6px;margin:8px 0"><input id="mve-enabled" type="checkbox"> 启用标题修正</label>' +
             '<label style="display:flex;align-items:center;gap:6px;margin:8px 0"><input id="mve-dedup" type="checkbox"> 启用翻页去重（改动后刷新页面生效）</label>' +
             '<label style="display:flex;align-items:center;gap:6px;margin:8px 0"><input id="mve-grid" type="checkbox"> 启用片单网格化（改动后刷新页面生效）</label>' +
@@ -885,11 +1029,33 @@
             '<div id="mve-msg" style="margin-top:8px;font-size:12px;color:#9db8dd;min-height:14px"></div>';
         document.body.appendChild(panel);
 
+        if (SITE === 'jable') {
+            // Jable 没有这些功能，隐藏无关开关（保留配置值，回显/保存不受影响）
+            ['#mve-dedup', '#mve-grid', '#mve-preview'].forEach((sel) => {
+                const label = panel.querySelector(sel).closest('label');
+                if (label) label.style.display = 'none';
+            });
+        }
+
+        // 切换服务商：更新 Key 申请提示；选「自定义」才展开地址/模型手填区
+        panel.querySelector('#mve-provider').addEventListener('change', updateProviderUI);
         panel.querySelector('#mve-save').addEventListener('click', () => {
+            const preset = PROVIDERS.find((p) => p.id === panel.querySelector('#mve-provider').value) || PROVIDERS[0];
+            let baseUrl, model;
+            if (preset.id === 'custom') {
+                baseUrl = panel.querySelector('#mve-base').value.trim() || DEFAULTS.baseUrl;
+                model = panel.querySelector('#mve-model').value.trim() || DEFAULTS.model;
+            } else {
+                baseUrl = preset.baseUrl;
+                // 同一服务商保留当前模型（可能被 404 自动发现机制切换到更新型号）；
+                // 换了服务商才采用新预设的默认模型
+                model = (config.provider === preset.id && config.model) ? config.model : preset.model;
+            }
             config = {
-                baseUrl: panel.querySelector('#mve-base').value.trim() || DEFAULTS.baseUrl,
+                provider: preset.id,
+                baseUrl,
                 apiKey: panel.querySelector('#mve-key').value.trim(),
-                model: panel.querySelector('#mve-model').value.trim() || DEFAULTS.model,
+                model,
                 mode: panel.querySelector('#mve-mode-llm').checked ? 'llm' : 'ja',
                 titlesEnabled: panel.querySelector('#mve-enabled').checked,
                 dedupEnabled: panel.querySelector('#mve-dedup').checked,
@@ -923,7 +1089,7 @@
     function exportBackup() {
         const data = {
             app: 'missav-enhancer',
-            version: '3.3.0',
+            version: '3.4.0',
             exportedAt: new Date().toISOString(),
             config,
             cache,
@@ -974,14 +1140,27 @@
         if (el) el.textContent = t;
     }
 
+    // 模块级函数（buildUI 绑定事件、togglePanel 回显都调用）：
+    // 按当前选中的服务商更新 Key 申请提示，并切换自定义手填区显隐
+    function updateProviderUI() {
+        if (!panel) return;
+        const p = PROVIDERS.find((x) => x.id === panel.querySelector('#mve-provider').value) || PROVIDERS[0];
+        panel.querySelector('#mve-custom-fields').style.display = p.id === 'custom' ? '' : 'none';
+        panel.querySelector('#mve-key-hint').textContent = p.id === 'custom'
+            ? '自定义服务需手填 OpenAI 兼容接口地址与模型名'
+            : '到 ' + p.keyHint + ' 申请 Key，粘贴到下方即可（地址和模型已自动填好）';
+    }
+
     function togglePanel() {
         if (!panel) return;
         const show = panel.style.display === 'none';
         panel.style.display = show ? 'block' : 'none';
         if (show) {
+            panel.querySelector('#mve-provider').value = config.provider || 'kimi';
             panel.querySelector('#mve-base').value = config.baseUrl;
             panel.querySelector('#mve-key').value = config.apiKey;
             panel.querySelector('#mve-model').value = config.model;
+            updateProviderUI();
             panel.querySelector(config.mode === 'llm' ? '#mve-mode-llm' : '#mve-mode-ja').checked = true;
             panel.querySelector('#mve-enabled').checked = config.titlesEnabled;
             panel.querySelector('#mve-dedup').checked = config.dedupEnabled;
@@ -989,7 +1168,7 @@
             panel.querySelector('#mve-preview').checked = config.previewExclusive;
             panel.querySelector('#mve-showbtn').checked = config.showButton;
             if (lastError) msg('上次出错：' + lastError);
-            else msg(config.mode === 'llm' && !config.apiKey ? '重译模式需填 Kimi(Moonshot) API Key' : '');
+            else msg(config.mode === 'llm' && !config.apiKey ? '重译模式需先选择大模型服务并填入 API Key' : '');
         }
     }
 
@@ -1004,14 +1183,21 @@
         if (gridUl && document.contains(gridUl)) relocateStrayFilterBars(gridUl);
     }, 200);
     const debouncedReapplyTitles = debounce(() => {
-        if (config.titlesEnabled) applyCached(collectCards());
+        if (!config.titlesEnabled) return;
+        // Jable：新渲染的卡片（含轮播克隆）需要补徽章、记录原文并回写译文
+        if (SITE === 'jable') processJableDom();
+        else applyCached(collectCards());
     }, 400);
 
     function init() {
-        rescueChallengePage();
-        if (isPlaylistPage && config.gridEnabled) waitFor(applyGridLayout);
-        if (config.dedupEnabled) waitFor(dedup);
-        if (config.previewExclusive) initPreviewExclusive();
+        // rescue / grid / dedup / preview 是 MissAV 专属（Jable 无对应页面结构；
+        // Jable 的预览行为未做适配测试，预览独占暂不开启）
+        if (SITE === 'missav') {
+            rescueChallengePage();
+            if (isPlaylistPage && config.gridEnabled) waitFor(applyGridLayout);
+            if (config.dedupEnabled) waitFor(dedup);
+            if (config.previewExclusive) initPreviewExclusive();
+        }
         buildUI();
         if (config.titlesEnabled) {
             // 等去重和首屏渲染稳定后再处理标题
@@ -1023,7 +1209,7 @@
             debouncedReapplyTitles();
         }).observe(document.body, { childList: true, subtree: true });
         if (typeof GM_registerMenuCommand === 'function') {
-            GM_registerMenuCommand('MissAV 综合增强设置', togglePanel);
+            GM_registerMenuCommand(SITE === 'jable' ? 'Jable 标题增强设置' : 'MissAV 综合增强设置', togglePanel);
         }
     }
 
