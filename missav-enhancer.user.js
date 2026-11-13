@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      3.5.0
-// @description  MissAV 四合一 + Jable 标题增强：1) 翻页去重——列表翻页时服务端常在页边界返回重复影片，自动隐藏；2) 标题修正——MissAV 抓取日文原版标题替换机翻中文，可选填大模型 API Key 升级为重译（内置 Kimi/DeepSeek/OpenAI/GLM 预设）；Jable 中文标题自动在封面加「字幕」标识，非中文标题大模型翻译为中文；3) 片单网格化——播放列表页改造为分类页同款缩略图网格卡片；4) 预览独占——手机端点卡片看预览时，自动暂停上一个预览视频，同时只播一个
+// @version      4.0.0
+// @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、列表页标题放大、订阅页网格卡片（原 GetAV 脚本并入）
 // @author       lingyuncrystal
 // @license      MIT
 // @icon         https://missav.ws/favicon.ico
@@ -11,6 +11,8 @@
 // @match        https://missav.ws/*
 // @match        https://missav.com/*
 // @match        https://jable.tv/*
+// @match        *://getav.net/*
+// @match        *://*.getav.net/*
 // @run-at       document-idle
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -30,8 +32,10 @@
 
     const LOG_PREFIX = '[MissAV 综合增强]';
 
-    /** 站点识别：rescue/grid/dedup/preview 是 MissAV 专属；titles 与设置面板两站共用 */
-    const SITE = /(^|\.)jable\.tv$/i.test(location.hostname) ? 'jable' : 'missav';
+    /** 站点识别：rescue/grid/dedup/preview 是 MissAV 专属，getav-ui 是 GetAV 专属；titles 与设置面板三站共用 */
+    const SITE = /(^|\.)jable\.tv$/i.test(location.hostname) ? 'jable'
+        : /(^|\.)getav\.net$/i.test(location.hostname) ? 'getav'
+        : 'missav';
 
     /** 统一日志（用 warn 级别，普通控制台过滤 info 时仍可见） */
     function log(...args) {
@@ -415,6 +419,24 @@
         else localStorage.setItem('mve-cache', raw);
     }
 
+    /* ---------------- 中文标题来源优先级 ----------------
+     * getav（精校中字，最准）> jable（官方繁中）> llm（大模型译文）。
+     * 高优先级来源可以覆盖低优先级；低优先级永远不能覆盖高优先级。
+     * 旧缓存条目没有 zhSrc 字段：有 zh 即视为 llm 级（1）。 */
+    const ZH_SRC_PRIORITY = { getav: 3, jable: 2, llm: 1 };
+
+    /** 按优先级写入中文标题；返回是否真正发生变更（供保存缓存判断） */
+    function setZh(slug, zh, src) {
+        const hit = cache[slug] || {};
+        const curPri = hit.zh ? (ZH_SRC_PRIORITY[hit.zhSrc] || ZH_SRC_PRIORITY.llm) : 0;
+        if ((ZH_SRC_PRIORITY[src] || 0) < curPri) return false; // 低优先级不覆盖
+        if (hit.zh === zh && hit.zhSrc === src) return false;
+        hit.zh = zh;
+        hit.zhSrc = src;
+        cache[slug] = hit;
+        return true;
+    }
+
     const PROMPT_VERSION = 2; // 提示词版本：变更后旧 zh 译文作废
 
     let config = loadConfig();
@@ -549,6 +571,89 @@
             f.src = u.href;
             (document.body || document.documentElement).appendChild(f);
         });
+    }
+
+    /* ---------------- GetAV 中文标题源（优先级最高：精校中字） ----------------
+     * GetAV 视频页（/zh/videos/<番号>）服务端直出完整中文标题，
+     * 油猴 GM_xhr 跨站 GET 即可拿到，无需 iframe、无 Cloudflare。
+     * 未收录的番号记负缓存 getavMiss（7 天），避免每次翻页重复查询。 */
+
+    const GETAV_MISS_TTL = 7 * 24 * 3600 * 1000; // 负缓存 7 天（新片可能随后收录）
+
+    /** 跨站 GET，返回 { status, text }；网络层失败 reject */
+    function httpGet(url) {
+        return new Promise((resolve, reject) => {
+            if (typeof GM_xmlhttpRequest !== 'function') {
+                reject(new Error('当前脚本管理器不支持 GM_xmlhttpRequest'));
+                return;
+            }
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url,
+                timeout: 30000,
+                onload: (r) => resolve({ status: r.status, text: r.responseText }),
+                onerror: () => reject(new Error('网络错误')),
+                ontimeout: () => reject(new Error('超时')),
+            });
+        });
+    }
+
+    /** 从 GetAV 视频页 HTML 解析中文标题；404 / 未收录返回 null */
+    function parseGetavTitle(html) {
+        if (!html) return null;
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const h1 = doc.querySelector('h1');
+        if (!h1) return null; // SPA 壳或兜底首页
+        const t = h1.textContent.trim();
+        if (!t || t === '404' || /页面未找到/.test(t)) return null;
+        return t;
+    }
+
+    /**
+     * 按番号查 GetAV 中文标题。命中返回标题文本；未收录返回 null 并写负缓存；
+     * 网络失败返回 null 但【不写】负缓存（下次重试）。
+     */
+    async function fetchGetavTitle(slug) {
+        const hit = cache[slug];
+        if (hit && hit.getavMiss && Date.now() - hit.getavMiss < GETAV_MISS_TTL) return null;
+        try {
+            const r = await httpGet('https://getav.net/zh/videos/' + encodeURIComponent(slug));
+            if (r.status < 200 || r.status >= 300) {
+                // 404 = 确认未收录，写负缓存；5xx 等异常不写，下次重试
+                if (r.status === 404) {
+                    cache[slug] = Object.assign(cache[slug] || {}, { getavMiss: Date.now() });
+                }
+                return null;
+            }
+            const title = parseGetavTitle(r.text);
+            if (!title) {
+                cache[slug] = Object.assign(cache[slug] || {}, { getavMiss: Date.now() });
+                return null;
+            }
+            return title;
+        } catch (e) {
+            log('GetAV 查询失败 ' + slug, e);
+            return null;
+        }
+    }
+
+    /**
+     * 第 2 层解析：批量查 GetAV（并发 ≤2），命中的写缓存并即时回写页面。
+     * 返回未命中的番号数组，交给下一层（日文抓取 + 大模型）。
+     */
+    async function resolveViaGetav(slugs) {
+        const missed = [];
+        for (let i = 0; i < slugs.length; i += 2) {
+            await Promise.all(slugs.slice(i, i + 2).map(async (s) => {
+                const title = await fetchGetavTitle(s);
+                if (title && setZh(s, title, 'getav')) {
+                    saveCache(cache);
+                    applyCached(collectCards());
+                }
+                if (!title) missed.push(s);
+            }));
+        }
+        return missed;
     }
 
     /* ---------------- Kimi 大模型翻译 ---------------- */
@@ -797,8 +902,7 @@
                     const orig = anchor.textContent.trim();
                     if (classifyTitle(orig) === 'cn') {
                         ensureSubBadge(box);
-                        cache[slug] = Object.assign(hit, { zh: orig, zhSrc: 'jable' });
-                        changed = true;
+                        if (setZh(slug, orig, 'jable')) changed = true;
                     }
                 }
                 return;
@@ -807,11 +911,9 @@
             const lang = classifyTitle(orig);
             if (lang === 'cn') {
                 ensureSubBadge(box);
-                if (!hit || hit.zh !== orig) {
-                    // 只写 zh 不碰 ja——避免「日文原标题」模式错显中文
-                    cache[slug] = Object.assign(hit || {}, { zh: orig, zhSrc: 'jable' });
-                    changed = true;
-                }
+                // 只写 zh 不碰 ja——避免「日文原标题」模式错显中文；
+                // setZh 按优先级写入，不会覆盖已有的 GetAV 精校中文
+                if (setZh(slug, orig, 'jable')) changed = true;
             } else if (lang === 'ja') {
                 cache[slug] = Object.assign(hit || {}, { ja: orig });
                 changed = true;
@@ -833,17 +935,23 @@
         running = true;
         setButtonState('translating');
         try {
-            if (config.mode === 'llm' && config.apiKey) {
-                const todo = [...new Set(cards.map((c) => c.slug))]
-                    .filter((s) => cache[s] && cache[s].ja && !cache[s].zh);
-                for (let i = 0; i < todo.length; i += 20) {
-                    const chunk = todo.slice(i, i + 20);
-                    const zhArr = await translateBatch(chunk.map((s) => cache[s].ja));
-                    chunk.forEach((s, j) => {
-                        cache[s].zh = zhArr[j];
-                    });
-                    saveCache(cache);
-                    applyCached(collectJableCards());
+            if (config.mode === 'llm') {
+                // 第 2 层：GetAV 精校中文（无需 Key，命中即显示）
+                const wantZh = [...new Set(cards.map((c) => c.slug))].filter((s) => !cache[s] || !cache[s].zh);
+                if (wantZh.length) await resolveViaGetav(wantZh);
+                // 第 3 层：剩余日文原标题走大模型（需要 Key）
+                if (config.apiKey) {
+                    const todo = [...new Set(cards.map((c) => c.slug))]
+                        .filter((s) => cache[s] && cache[s].ja && !cache[s].zh);
+                    for (let i = 0; i < todo.length; i += 20) {
+                        const chunk = todo.slice(i, i + 20);
+                        const zhArr = await translateBatch(chunk.map((s) => cache[s].ja));
+                        chunk.forEach((s, j) => {
+                            setZh(s, zhArr[j], 'llm');
+                        });
+                        saveCache(cache);
+                        applyCached(collectJableCards());
+                    }
                 }
             }
             lastError = null;
@@ -875,8 +983,98 @@
         return errText;
     }
 
+    /* ---------------- GetAV 本站：中文标题直接入缓存（最高质量来源） ---------------- */
+
+    /**
+     * GetAV 卡片：.group 容器内指向 /videos/<番号> 的链接。
+     * 标题链接的特征是文本里带番号本身（信息栏链接是「无码字幕1:57:24」之类，不含番号）。
+     */
+    function collectGetavCards() {
+        const out = [];
+        document.querySelectorAll('a[href*="/videos/"]').forEach((anchor) => {
+            const slug = slugFromHref(anchor.href);
+            if (!slug) return;
+            const text = (anchor.getAttribute('title') || anchor.textContent).trim();
+            if (!text.toUpperCase().includes(slug.toUpperCase())) return;
+            out.push({ slug, anchor, hidden: false });
+        });
+        // 详情页 h1（同样带番号）
+        const h1 = document.querySelector('h1');
+        const pageSlug = slugFromHref(location.href);
+        if (h1 && pageSlug && h1.textContent.toUpperCase().includes(pageSlug.toUpperCase())) {
+            out.push({ slug: pageSlug, anchor: h1, isDetail: true, hidden: false });
+        }
+        return out;
+    }
+
+    /**
+     * GetAV 无需网络的 DOM 处理：中文标题（GetAV 精校，质量最高的来源）
+     * 直接入缓存供三站复用；个别日文原标题记入 ja 等大模型兜底。
+     * 与 Jable 同理：只有脚本未动过 DOM（缓存无 zh）时才信任 DOM 语言判定。
+     */
+    function processGetavDom() {
+        const cards = collectGetavCards();
+        let changed = false;
+        cards.forEach(({ slug, anchor }) => {
+            const hit = cache[slug];
+            if (hit && hit.zh) return; // 已有中文（DOM 可能已被替换过），不重复判定
+            const orig = (anchor.getAttribute('title') || anchor.textContent).trim();
+            const lang = classifyTitle(orig);
+            if (lang === 'cn') {
+                if (setZh(slug, orig, 'getav')) changed = true;
+            } else if (lang === 'ja' && (!hit || !hit.ja)) {
+                cache[slug] = Object.assign(hit || {}, { ja: orig });
+                changed = true;
+            }
+        });
+        if (changed) saveCache(cache);
+        applyCached(cards);
+        return cards;
+    }
+
+    /** GetAV 主流程：本站中文直接入缓存；日文原标题走「缓存 → 大模型」（不查自己） */
+    async function enhanceGetavTitles() {
+        if (running) {
+            rerunAfter = true;
+            return;
+        }
+        const cards = processGetavDom();
+        if (!cards.length) return;
+        if (config.mode !== 'llm' || !config.apiKey) return;
+        const todo = [...new Set(cards.map((c) => c.slug))]
+            .filter((s) => cache[s] && cache[s].ja && !cache[s].zh);
+        if (!todo.length) return;
+        running = true;
+        setButtonState('translating');
+        try {
+            for (let i = 0; i < todo.length; i += 20) {
+                const chunk = todo.slice(i, i + 20);
+                const zhArr = await translateBatch(chunk.map((s) => cache[s].ja));
+                chunk.forEach((s, j) => {
+                    setZh(s, zhArr[j], 'llm');
+                });
+                saveCache(cache);
+                applyCached(collectGetavCards());
+            }
+            lastError = null;
+            setButtonState('done');
+        } catch (e) {
+            log(e);
+            lastError = describeTitleError(e);
+            setButtonState('error', lastError);
+            if (panel && panel.style.display !== 'none') msg(lastError);
+        } finally {
+            running = false;
+            if (rerunAfter) {
+                rerunAfter = false;
+                setTimeout(enhanceTitles, 500);
+            }
+        }
+    }
+
     function collectCards() {
         if (SITE === 'jable') return collectJableCards();
+        if (SITE === 'getav') return collectGetavCards();
         const out = [];
         document.querySelectorAll('.thumbnail').forEach((thumb) => {
             const anchor = thumb.parentElement.querySelector('.my-2 a[href], a.mv-full-title[href]') ||
@@ -916,6 +1114,7 @@
     async function enhanceTitles() {
         if (!config.titlesEnabled) return;
         if (SITE === 'jable') return enhanceJableTitles();
+        if (SITE === 'getav') return enhanceGetavTitles();
         if (running) {
             rerunAfter = true;
             return;
@@ -924,10 +1123,11 @@
         if (!cards.length) return;
 
         applyCached(cards);
-        const needJa = [...new Set(cards.map((c) => c.slug))].filter((s) => !cache[s] || !cache[s].ja);
-        const needZh = config.mode === 'llm' && config.apiKey
-            ? [...new Set(cards.map((c) => c.slug))].filter((s) => cache[s] && cache[s].ja && !cache[s].zh)
-            : [];
+        const allSlugs = [...new Set(cards.map((c) => c.slug))];
+        const needJa = allSlugs.filter((s) => !cache[s] || !cache[s].ja);
+        // 重译模式：GetAV 精校中文是免费来源（无需 Key），只要有番号缺中文就有工作可做
+        const llmWanted = config.mode === 'llm';
+        const needZh = llmWanted ? allSlugs.filter((s) => !cache[s] || !cache[s].zh) : [];
         if (!needJa.length && !needZh.length) return;
 
         running = true;
@@ -942,23 +1142,28 @@
                 const jaArr = chunk.map((s) => cache[s].ja);
                 const zhArr = await translateBatch(jaArr);
                 chunk.forEach((s, j) => {
-                    cache[s].zh = zhArr[j];
+                    setZh(s, zhArr[j], 'llm'); // 大模型译文优先级最低，不会覆盖 getav/jable 来源
                 });
                 saveCache(cache);
                 applyCached(collectCards());
             }
         };
         try {
-            if (needJa.length) {
+            // 第 2 层：GetAV 精校中文源（重译模式；无需 Key；命中即缓存并显示）
+            if (llmWanted && needZh.length) await resolveViaGetav(needZh);
+            // GetAV 命中的番号已有最佳中文，重译模式下连日文原文都不再需要——
+            // 日文抓取和大模型只为「GetAV 也没收录」的番号兜底
+            const needJa2 = llmWanted ? needJa.filter((s) => !cache[s].zh) : needJa;
+            if (needJa2.length) {
                 const isDetail = !!document.querySelector('h1') && !document.querySelector('.thumbnail');
-                const jaUrl = isDetail ? jaDetailUrl(needJa[0]) : jaListUrl();
+                const jaUrl = isDetail ? jaDetailUrl(needJa2[0]) : jaListUrl();
                 // 首次失败多为网络/代理波动或 CF 偶发验证：等 3 秒自动重试一次再放弃
                 const jaMap = await fetchJaTitles(jaUrl, isDetail).catch(async (e) => {
                     log('日文页首次抓取失败，3 秒后重试：' + e.message);
                     await new Promise((r) => setTimeout(r, 3000));
                     return fetchJaTitles(jaUrl, isDetail);
                 });
-                needJa.forEach((s) => {
+                needJa2.forEach((s) => {
                     if (jaMap[s]) cache[s] = Object.assign(cache[s] || {}, { ja: jaMap[s] });
                 });
                 saveCache(cache);
@@ -968,7 +1173,7 @@
                 // 各语言列表收录范围不同，日文列表页可能缺当前页的部分番号；
                 // 缺口抓日文详情页补齐（两个并发，结果永久缓存，只补一次）
                 if (!isDetail) {
-                    const missing = needJa.filter((s) => !cache[s] || !cache[s].ja).slice(0, 8);
+                    const missing = needJa2.filter((s) => !cache[s] || !cache[s].ja).slice(0, 8);
                     for (let i = 0; i < missing.length; i += 2) {
                         await Promise.all(missing.slice(i, i + 2).map(async (s) => {
                             try {
@@ -1043,7 +1248,7 @@
             'background:#1f2430;border:1px solid #3b7cd7;color:#d7dee9;font-size:13px;display:none;' +
             'box-shadow:0 4px 20px rgba(0,0,0,.6);';
         panel.innerHTML =
-            '<div style="font-weight:600;margin-bottom:10px">' + (SITE === 'jable' ? 'Jable 标题增强设置' : 'MissAV 综合增强设置') + '</div>' +
+            '<div style="font-weight:600;margin-bottom:10px">' + ({ jable: 'Jable 标题增强设置', getav: 'GetAV 增强设置' }[SITE] || 'MissAV 综合增强设置') + '</div>' +
             '<div style="margin-bottom:8px">' +
             '<label style="display:flex;align-items:center;gap:6px;margin-bottom:4px"><input type="radio" name="mve-mode" id="mve-mode-ja" value="ja"> 日文原标题（无需 Key）</label>' +
             '<label style="display:flex;align-items:center;gap:6px"><input type="radio" name="mve-mode" id="mve-mode-llm" value="llm"> 大模型重译（需 API Key）</label>' +
@@ -1076,8 +1281,8 @@
             '<div id="mve-msg" style="margin-top:8px;font-size:12px;color:#9db8dd;min-height:14px"></div>';
         document.body.appendChild(panel);
 
-        if (SITE === 'jable') {
-            // Jable 没有这些功能，隐藏无关开关（保留配置值，回显/保存不受影响）
+        if (SITE !== 'missav') {
+            // 这三个功能是 MissAV 专属，其他站点隐藏无关开关（保留配置值，回显/保存不受影响）
             ['#mve-dedup', '#mve-grid', '#mve-preview'].forEach((sel) => {
                 const label = panel.querySelector(sel).closest('label');
                 if (label) label.style.display = 'none';
@@ -1136,7 +1341,7 @@
     function exportBackup() {
         const data = {
             app: 'missav-enhancer',
-            version: '3.5.0',
+            version: '4.0.0',
             exportedAt: new Date().toISOString(),
             config,
             cache,
@@ -1220,6 +1425,361 @@
     }
 
     /* ================================================================
+     * 模块七 getav-ui：GetAV 界面增强（原 getav-full-titles 脚本并入）
+     * 四个功能：解除标题截断、title 属性补全、列表页标题放大一号、
+     * 订阅页三列网格卡片。与主流程共用 document-idle 启动，
+     * 首次渲染可能有极短暂的截断闪现，Observer 会立即修正。
+     * ================================================================ */
+
+    const isGetavSubscriptionsPage = SITE === 'getav' && /\/profile\/subscriptions/.test(location.pathname);
+    const GETAV_ENLARGE_FACTOR = 1.12; // 列表页标题放大倍率（实测约大一号，再大卡片会拥挤）
+    const GETAV_MIN_FONT = 11;  // 只放大正文级标题：跳过更小的辅助文字
+    const GETAV_MAX_FONT = 20;  // 跳过页面大标题
+
+    /** querySelectorAll 的补充：动态加载时新增节点本身可能也匹配选择器，需把 root 自身纳入 */
+    function queryAllWithSelf(root, selector) {
+        const list = [...(root || document).querySelectorAll(selector)];
+        if (root && root.nodeType === 1 && typeof root.matches === 'function' && root.matches(selector)) {
+            list.unshift(root);
+        }
+        return list;
+    }
+
+    function injectGetavStyles() {
+        let css = `
+        a[title], h1, h2, h3, h4, .title, .video-title, [class*="title"],
+        [class*="Title"], [class*="name"], [class*="Name"] {
+            white-space: normal !important;
+            overflow: visible !important;
+            text-overflow: unset !important;
+            text-overflow: clip !important;
+            -webkit-line-clamp: unset !important;
+            -webkit-box-orient: unset !important;
+            display: block !important;
+            word-break: break-word !important;
+            word-wrap: break-word !important;
+            max-height: none !important;
+            height: auto !important;
+        }
+        [class*="card"], [class*="item"], [class*="video"], [class*="post"],
+        article, li, .entry {
+            overflow: visible !important;
+        }
+        `;
+        if (isGetavSubscriptionsPage) {
+            css += `
+        /* ============ 订阅页：网格 ============ */
+        #getav-sub-grid {
+            display: grid !important;
+            grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+            gap: 20px !important;
+            border: none !important;
+            width: 100% !important;
+            padding: 8px 0 16px !important;
+        }
+        /* 窄屏（手机等宽度不够时）两列 */
+        @media (max-width: 700px) {
+            #getav-sub-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+                gap: 14px !important;
+            }
+            #getav-sub-grid > div { padding: 14px !important; }
+            #getav-sub-grid > div > a.flex .rounded-full {
+                width: 60px !important;
+                height: 60px !important;
+            }
+            #getav-sub-grid p.truncate { font-size: 13px !important; }
+        }
+
+        /* ============ 卡片本体 ============ */
+        #getav-sub-grid > div {
+            position: relative;
+            display: flex !important;
+            flex-direction: column !important;
+            align-items: stretch !important;
+            gap: 12px !important;
+            padding: 18px !important;
+            background: linear-gradient(165deg, rgba(255,255,255,0.045) 0%, rgba(255,255,255,0.015) 60%, rgba(255,255,255,0.03) 100%) !important;
+            border: 1px solid rgba(255,255,255,0.08) !important;
+            border-radius: 16px !important;
+            transition: transform .22s cubic-bezier(.34,1.4,.5,1),
+                        border-color .22s ease,
+                        box-shadow .22s ease,
+                        background .22s ease;
+        }
+        #getav-sub-grid > div:hover {
+            transform: translateY(-4px);
+            border-color: rgba(244,63,94,0.4) !important;
+            background: linear-gradient(165deg, rgba(255,255,255,0.07) 0%, rgba(255,255,255,0.025) 60%, rgba(244,63,94,0.04) 100%) !important;
+            box-shadow: 0 12px 32px rgba(0,0,0,0.45),
+                        0 0 0 1px rgba(244,63,94,0.10),
+                        0 4px 16px rgba(244,63,94,0.08) !important;
+        }
+
+        /* ============ 头像：顶部居中 + 悬浮光环 ============ */
+        #getav-sub-grid > div > a.flex .rounded-full {
+            width: 72px !important;
+            height: 72px !important;
+            margin: 2px auto 0 !important;
+            transition: box-shadow .22s ease, border-color .22s ease !important;
+        }
+        #getav-sub-grid > div:hover > a.flex .rounded-full {
+            border-color: rgba(244,63,94,0.55) !important;
+            box-shadow: 0 0 0 3px rgba(244,63,94,0.16),
+                        0 0 14px rgba(244,63,94,0.28) !important;
+        }
+
+        /* ============ 链接区：竖排居中（头像在上，名字在下） ============ */
+        #getav-sub-grid > div > a.flex {
+            display: flex !important;
+            flex-direction: column !important;
+            align-items: center !important;
+            justify-content: flex-start !important;
+            width: 100% !important;
+            gap: 10px !important;
+            text-align: center !important;
+            text-decoration: none !important;
+        }
+        /* 名字容器：显式撑满整行（不再依赖 flex 伸展，根治竖排问题） */
+        #getav-sub-grid > div > a.flex > div.min-w-0 {
+            width: 100% !important;
+            min-width: 0 !important;
+            text-align: center !important;
+        }
+        /* 中文名：最多两行，居中 */
+        #getav-sub-grid p.truncate {
+            font-size: 14px !important;
+            font-weight: 600 !important;
+            letter-spacing: 0.01em !important;
+            line-height: 1.35 !important;
+            color: #fff !important;
+            white-space: normal !important;
+            overflow: visible !important;
+            text-overflow: unset !important;
+            text-align: center !important;
+        }
+        /* 日文原名：小字居中 */
+        #getav-sub-grid p.truncate + p {
+            font-size: 11px !important;
+            letter-spacing: 0.04em !important;
+            color: rgba(255,255,255,0.40) !important;
+            margin-top: 3px !important;
+            text-align: center !important;
+            white-space: normal !important;
+            overflow: visible !important;
+        }
+        /* 卡片悬浮时名字高亮 */
+        #getav-sub-grid > div:hover p.truncate {
+            text-shadow: 0 0 12px rgba(244,63,94,0.35) !important;
+        }
+
+        /* ============ 取消订阅按钮 ============ */
+        #getav-sub-grid > div > button {
+            width: 100% !important;
+            display: inline-flex !important;
+            flex-direction: row !important;
+            flex-wrap: nowrap !important;
+            white-space: nowrap !important;
+            align-items: center !important;
+            justify-content: center !important;
+            flex-shrink: 0 !important;
+            margin-top: auto !important;
+            padding: 9px 0 !important;
+            font-size: 13px !important;
+            letter-spacing: 0.1em !important;
+            border-radius: 9999px !important;
+            border: 1px solid rgba(255,255,255,0.10) !important;
+            background: rgba(255,255,255,0.04) !important;
+            color: rgba(255,255,255,0.62) !important;
+            transition: all .2s ease !important;
+        }
+        #getav-sub-grid > div > button:hover {
+            border-color: rgba(244,63,94,0.5) !important;
+            background: rgba(244,63,94,0.12) !important;
+            color: #fda4af !important;
+            box-shadow: 0 2px 14px rgba(244,63,94,0.25) !important;
+            transform: translateY(-1px) !important;
+        }
+        #getav-sub-grid > div > button:active {
+            transform: scale(0.97) !important;
+        }
+        #getav-sub-grid > div > button svg {
+            flex-shrink: 0 !important;
+            margin-right: 6px !important;
+            transition: transform .2s ease !important;
+        }
+        #getav-sub-grid > div > button:hover svg {
+            transform: scale(1.12) rotate(-6deg) !important;
+        }
+        `;
+        }
+        const style = document.createElement('style');
+        style.id = 'getav-full-title-style';
+        style.textContent = css;
+        (document.head || document.documentElement).appendChild(style);
+    }
+
+    /** 订阅页网格卡片（内联样式与 CSS 双保险——站点大量使用内联样式，纯 CSS 打不赢优先级） */
+    function styleGetavCards() {
+        document.querySelectorAll('#getav-sub-grid > div').forEach((card) => {
+            const anchor = card.querySelector(':scope > a.flex');
+            const btn = card.querySelector(':scope > button');
+
+            if (anchor) {
+                anchor.style.setProperty('display', 'flex', 'important');
+                anchor.style.setProperty('flex-direction', 'column', 'important');
+                anchor.style.setProperty('align-items', 'center', 'important');
+                anchor.style.setProperty('justify-content', 'flex-start', 'important');
+                anchor.style.setProperty('width', '100%', 'important');
+                anchor.style.setProperty('gap', '10px', 'important');
+                anchor.style.setProperty('text-align', 'center', 'important');
+
+                const textDiv = anchor.querySelector(':scope > div.min-w-0');
+                if (textDiv) {
+                    textDiv.style.setProperty('width', '100%', 'important');
+                    textDiv.style.setProperty('min-width', '0', 'important');
+                    textDiv.style.setProperty('text-align', 'center', 'important');
+                    textDiv.style.setProperty('flex', 'none', 'important');
+                }
+                const ps = anchor.querySelectorAll('p');
+                ps.forEach((p) => {
+                    p.style.setProperty('white-space', 'normal', 'important');
+                    p.style.setProperty('overflow', 'visible', 'important');
+                    p.style.setProperty('text-overflow', 'unset', 'important');
+                    p.style.setProperty('text-align', 'center', 'important');
+                    p.style.setProperty('max-width', '100%', 'important');
+                });
+                // 日文名和中文名完全相同时，隐藏日文名（避免重复，如“友田彩也香”）
+                if (ps.length >= 2 && ps[0].textContent.trim() === ps[1].textContent.trim()) {
+                    ps[1].style.setProperty('display', 'none', 'important');
+                }
+            }
+
+            if (btn) {
+                btn.style.setProperty('width', '100%', 'important');
+                btn.style.setProperty('display', 'inline-flex', 'important');
+                btn.style.setProperty('flex-direction', 'row', 'important');
+                btn.style.setProperty('flex-wrap', 'nowrap', 'important');
+                btn.style.setProperty('white-space', 'nowrap', 'important');
+                btn.style.setProperty('align-items', 'center', 'important');
+                btn.style.setProperty('justify-content', 'center', 'important');
+                btn.style.setProperty('margin-top', 'auto', 'important');
+                btn.style.setProperty('box-sizing', 'border-box', 'important');
+                const svg = btn.querySelector('svg');
+                if (svg) svg.style.setProperty('flex-shrink', '0', 'important');
+            }
+        });
+    }
+
+    function makeGetavThreeColumns() {
+        if (!isGetavSubscriptionsPage) return;
+        const containers = document.querySelectorAll('div.divide-y');
+        for (const c of containers) {
+            if (c.id === 'getav-sub-grid') continue;
+            const rows = Array.from(c.children).filter(
+                (el) => el.matches && el.matches('div.flex.flex-col')
+            );
+            if (rows.length >= 3) {
+                c.id = 'getav-sub-grid';
+            }
+        }
+        styleGetavCards();
+    }
+
+    /** 展开仍被截断的元素 */
+    function expandGetavTruncated(root) {
+        const els = queryAllWithSelf(root, 'a, span, div, p, h1, h2, h3, h4, li');
+        for (const el of els) {
+            if (el.children.length > 3) continue;
+            if (el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1) {
+                const cs = getComputedStyle(el);
+                if (cs.whiteSpace === 'nowrap' || cs.textOverflow === 'ellipsis' ||
+                    cs.overflow === 'hidden' || cs.webkitLineClamp !== 'none') {
+                    el.style.setProperty('white-space', 'normal', 'important');
+                    el.style.setProperty('overflow', 'visible', 'important');
+                    el.style.setProperty('text-overflow', 'clip', 'important');
+                    el.style.setProperty('-webkit-line-clamp', 'unset', 'important');
+                    el.style.setProperty('display', 'block', 'important');
+                    el.style.setProperty('max-height', 'none', 'important');
+                    el.style.setProperty('height', 'auto', 'important');
+                }
+            }
+        }
+    }
+
+    /** 用 title 属性补全文字 */
+    function fillGetavFromTitle(root) {
+        const els = queryAllWithSelf(root, 'a[title]');
+        for (const el of els) {
+            const t = el.getAttribute('title');
+            if (t && (el.textContent.includes('…') || el.textContent.includes('...') ||
+                el.textContent.trim().length < t.trim().length / 2)) {
+                el.textContent = t;
+            }
+        }
+    }
+
+    /** 列表页标题字号大一号 */
+    const getavEnlargedTitles = new WeakSet();
+    function enlargeGetavListTitles(root) {
+        // 订阅页有专门的名字样式，视频详情页（/videos/番号）不在此列，其余（首页/分类/搜索等）都算列表页
+        if (isGetavSubscriptionsPage) return;
+        if (/\/videos\//i.test(location.pathname)) return;
+        const els = queryAllWithSelf(
+            root,
+            'a[title], h1, h2, h3, h4, .title, .video-title, [class*="title"], [class*="Title"]'
+        );
+        for (const el of els) {
+            if (getavEnlargedTitles.has(el)) continue;
+            if (el.closest('#getav-sub-grid')) continue;
+            const size = parseFloat(getComputedStyle(el).fontSize);
+            // 只对正文级别的标题放大；确认放大后才标记进 WeakSet（否则站点 CSS
+            // 未加载完时字号暂时不在区间的元素会被永久跳过——已踩过的时序坑）
+            if (size >= GETAV_MIN_FONT && size <= GETAV_MAX_FONT) {
+                el.style.setProperty('font-size', Math.round(size * GETAV_ENLARGE_FACTOR) + 'px', 'important');
+                getavEnlargedTitles.add(el);
+            }
+        }
+    }
+
+    /** GetAV 界面增强入口（自带独立 Observer：增量扫描新增节点） */
+    function initGetavUi() {
+        injectGetavStyles();
+        let timer = null;
+        let pendingRoots = []; // 收集新增节点：只扫变化子树，避免每次变动都全文档强制同步布局
+        const schedule = () => {
+            clearTimeout(timer);
+            timer = setTimeout(() => {
+                const roots = pendingRoots.length ? pendingRoots.splice(0) : [document];
+                // 新增节点过多（整页重渲染）时退化为一次全文档扫描，反而更省
+                const targets = roots.length > 20 ? [document] : roots;
+                for (const root of targets) {
+                    fillGetavFromTitle(root);
+                    expandGetavTruncated(root);
+                    enlargeGetavListTitles(root);
+                }
+                makeGetavThreeColumns();
+            }, 300);
+        };
+        fillGetavFromTitle(document);
+        expandGetavTruncated(document);
+        enlargeGetavListTitles(document);
+        makeGetavThreeColumns();
+        new MutationObserver((muts) => {
+            let hasAdded = false;
+            for (const m of muts) {
+                if (!m.addedNodes.length) continue;
+                hasAdded = true;
+                for (const n of m.addedNodes) {
+                    if (n.nodeType === Node.ELEMENT_NODE) pendingRoots.push(n);
+                }
+            }
+            if (hasAdded) schedule();
+        }).observe(document.body, { childList: true, subtree: true });
+        window.addEventListener('load', schedule);
+    }
+
+    /* ================================================================
      * 启动与监听
      * 顺序：rescue → grid（片单页先改造 DOM）→ dedup → preview → titles。
      * DOM 变化共用一个 body 级 MutationObserver，回调里分发两个
@@ -1233,11 +1793,12 @@
         if (!config.titlesEnabled) return;
         // Jable：新渲染的卡片（含轮播克隆）需要补徽章、记录原文并回写译文
         if (SITE === 'jable') processJableDom();
+        else if (SITE === 'getav') processGetavDom();
         else applyCached(collectCards());
     }, 400);
 
     function init() {
-        // rescue / grid / dedup / preview 是 MissAV 专属（Jable 无对应页面结构；
+        // rescue / grid / dedup / preview 是 MissAV 专属（Jable/GetAV 无对应页面结构；
         // Jable 的预览行为未做适配测试，预览独占暂不开启）
         if (SITE === 'missav') {
             rescueChallengePage();
@@ -1245,6 +1806,7 @@
             if (config.dedupEnabled) waitFor(dedup);
             if (config.previewExclusive) initPreviewExclusive();
         }
+        if (SITE === 'getav') initGetavUi();
         buildUI();
         if (config.titlesEnabled) {
             // 等去重和首屏渲染稳定后再处理标题
@@ -1256,7 +1818,8 @@
             debouncedReapplyTitles();
         }).observe(document.body, { childList: true, subtree: true });
         if (typeof GM_registerMenuCommand === 'function') {
-            GM_registerMenuCommand(SITE === 'jable' ? 'Jable 标题增强设置' : 'MissAV 综合增强设置', togglePanel);
+            const menuLabel = { jable: 'Jable 标题增强设置', getav: 'GetAV 增强设置' }[SITE] || 'MissAV 综合增强设置';
+            GM_registerMenuCommand(menuLabel, togglePanel);
         }
     }
 
