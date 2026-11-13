@@ -1,6 +1,8 @@
-# MissAV 列表增强（missav-list-enhancer）
+# MissAV 综合增强（missav-enhancer）
 
-适用于 [MissAV](https://missav.ws/) 的油猴（Tampermonkey / Violentmonkey）用户脚本，两个功能合一：
+适用于 [MissAV](https://missav.ws/) 的油猴（Tampermonkey / Violentmonkey）用户脚本，三个功能合一：
+
+> ⚠️ **迁移提示（v3.0.0 起）**：本脚本由原「MissAV 列表增强（翻页去重 + 标题重译）」与「MissAV 片单网格化」合并而来，`@name` 已变更，Tampermonkey 会视为新脚本。请**先删除两个旧脚本，再安装本脚本**，避免重复运行。原有配置（API Key 等）与标题缓存会自动继承，无需重填。
 
 ## 功能一：翻页去重
 
@@ -11,17 +13,21 @@ MissAV 列表页码翻页时，服务端常在页边界返回与之前页面重�
 站点自带的中文标题机翻质量差，演员名也常被错译。两种模式可选：
 
 - **日文原标题（默认，无需任何 Key）**：自动抓取 `/ja/` 日文原版列表页的标题替换显示，番号、演员名（日文原文）都准确，且几乎零开销（每页一次同源请求）。
-- **大模型重译（可选）**：填入 Kimi（Moonshot）API Key 后，在日文原标题基础上调用大模型批量重译为自然流畅的简体中文（演员名保留日文原文），结果持久缓存，每部影片只翻译一次。
+- **大模型重译（可选）**：填入 Kimi（Moonshot）API Key 后，在日文原标题基础上调用大模型批量重译为自然流畅的简体中文（演员名按通行译名或自然音译），结果持久缓存，每部影片只翻译一次。
 
-页面右下角有浮动「译」按钮，点击打开设置面板：切换模式、填写 API 地址 / Key / 模型、清空缓存。
+## 功能三：片单网格化
+
+把「片单 / 播放列表」页面（`/playlists/*`）的竖向列表布局，改造成和「中文字幕」等分类页一样的缩略图网格卡片布局（手机 2 列 / 平板 3 列 / 宽屏 4 列）。「提交评语」「删除」功能完整保留，默认折叠在卡片下方的「评语 / 删除」开关里；只调整 class 与节点位置，不触碰 Alpine.js 绑定。片单页标题同样享受功能二的标题修正。
+
+## 设置面板
+
+页面右下角有浮动「译」按钮，点击打开设置面板：切换标题模式、填写 API 地址 / Key / 模型、清空缓存，以及三个功能的独立开关（翻页去重、片单网格化的开关改动后刷新页面生效）。
 
 ## 安装
 
 1. 浏览器安装 [Tampermonkey](https://www.tampermonkey.net/)（或 Violentmonkey）扩展。
-2. 点击脚本文件 [missav-list-enhancer.user.js](./missav-list-enhancer.user.js) 的 Raw 链接，扩展会自动弹出安装界面；或将文件内容复制到扩展中手动新建脚本。
-3. 打开任意列表页（如 `missav.ws/dm635/cn/release`）翻页即生效。
-
-> 从旧版「MissAV 翻页去重」升级：本脚本 @name 已变更，Tampermonkey 会视为新脚本，请**先删除旧脚本再安装**，避免重复运行。
+2. 点击脚本文件 [missav-enhancer.user.js](./missav-enhancer.user.js) 的 Raw 链接，扩展会自动弹出安装界面；或将文件内容复制到扩展中手动新建脚本。
+3. 打开任意列表页（如 `missav.ws/dm635/cn/release`）或片单页翻页即生效。
 
 ## 生效范围
 
@@ -30,20 +36,22 @@ https://missav.ws/*
 https://missav.com/*
 ```
 
-去重仅在同时存在卡片网格和 `?page=` 翻页链接的列表页上激活；标题修正作用于列表卡片与详情页 h1。
+去重仅在同时存在卡片网格和 `?page=` 翻页链接的列表页上激活；标题修正作用于列表卡片与详情页 h1；网格化仅作用于片单页。
 
 ## 实现说明
 
 | 模块 | 说明 |
 | --- | --- |
-| 翻页去重 | 从 URL `?page=` 取页码，按「路径 + 查询参数」区分列表；重复卡片 `display: none` 隐藏，`sessionStorage` 会话级存储 |
-| 日文原标题 | 将当前 URL 语言段替换为 `/ja/` 后用隐藏 iframe 加载（站点有 Cloudflare 人机验证，fetch/XHR 拿不到未缓存页面，iframe 让浏览器自己完成验证），解析卡片标题锚点按 slug 映射替换；各语言列表收录范围不同，缺口的番号再逐个抓日文详情页补齐 |
-| 大模型重译 | 兼容 OpenAI 格式的 `/chat/completions`（默认 Kimi `kimi-k2.6`，404 时自动发现可用模型），每批 ≤20 条，`response_format` 不支持时自动降级；跳过被去重隐藏的卡片 |
-| 缓存 | `GM_setValue` 持久缓存 slug → 日文/中文标题；MissAV Plus 重渲染标题时由 MutationObserver 防抖回写 |
+| utils | 共享工具：`waitFor` 就绪轮询、`debounce`、slug 提取、统一日志；业务模块只通过 DOM 约定间接协作 |
+| rescue | 反爬自救：站点偶尔返回永久空白的 JS 验证页，检测后给 URL 加无用参数刷新绕过 |
+| grid | 片单网格化：复用站点自带 Tailwind 工具类；只调 class 与节点位置，不破坏 Alpine.js；MissAV Plus 注入错位的筛选条自动移回 |
+| dedup | 翻页去重：从 URL `?page=` 取页码，按「路径 + 查询参数」区分列表；重复卡片 `display: none` 隐藏，`sessionStorage` 会话级存储 |
+| titles | 标题修正：隐藏 iframe 抓 `/ja/` 页面（站点有 Cloudflare 人机验证，fetch/XHR 拿不到未缓存页面，iframe 让浏览器自己完成验证）；大模型重译兼容 OpenAI 格式 `/chat/completions`（默认 Kimi `kimi-k2.6`，404 时自动发现可用模型），每批 ≤20 条，`response_format` 不支持时自动降级 |
+| settings-ui | 浮动按钮 + 设置面板；`GM_setValue` 持久缓存 slug → 日文/中文标题；MissAV Plus 重渲染标题时由 MutationObserver 防抖回写 |
 
 ## 版本
 
-当前版本：**2.0.7**，详见 [CHANGELOG](./CHANGELOG.md)。
+当前版本：**3.0.0**，详见 [CHANGELOG](./CHANGELOG.md)。
 
 ## 发布流程
 
@@ -61,8 +69,9 @@ push 到 main → GitHub 触发 webhook → Sleazyfork 抓取 raw 文件 → @ve
    - 同步方式选 **Webhook**；
    - 同步地址填 raw 文件地址（注意是 `raw` 地址，不能是 `/blob/` 页面地址）：
      ```
-     https://raw.githubusercontent.com/lingyuncrystal/missav-pagination-dedup/main/missav-list-enhancer.user.js
+     https://raw.githubusercontent.com/lingyuncrystal/missav-pagination-dedup/main/missav-enhancer.user.js
      ```
+   - ⚠️ v3.0.0 更名文件后，需把同步地址从旧的 `missav-list-enhancer.user.js` 改为上面的新地址（webhook 本身不用重配）。
 2. 保存后页面会生成本脚本专属的 Webhook URL 和 Secret，复制它们：
    - 到 GitHub 仓库 **Settings → Webhooks → Add webhook**：Payload URL 填该地址，Secret 填生成的密钥，Content type 选 `application/json`，只勾 **push** 事件；
    - 或者在发布时设置环境变量 `SLEAZYFORK_WEBHOOK_URL`，`publish.sh` 会自动完成 webhook 配置。
@@ -71,7 +80,7 @@ push 到 main → GitHub 触发 webhook → Sleazyfork 抓取 raw 文件 → @ve
 
 ### 日常发布（改完代码一键发布）
 
-1. 修改 `missav-list-enhancer.user.js`， bump 头部的 `@version`，并在 `CHANGELOG.md` 添加对应条目；
+1. 修改 `missav-enhancer.user.js`， bump 头部的 `@version`，并在 `CHANGELOG.md` 添加对应条目；
 2. 运行：
 
    ```bash
