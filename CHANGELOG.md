@@ -1,5 +1,9 @@
 # Changelog
 
+## [4.0.1] - 2026-11-13
+
+- **修复脚本在 missav.ai 上不运行的问题**：MissAV 主站域名已迁至 missav.ai，而旧 @match 只覆盖 missav.ws / missav.com，导致 Tampermonkey 在新域名下完全不注入脚本（表现为脚本「消失」，实为未运行）。新增 `@match https://missav.ai/*`，并增加 `@include` 正则兜底所有 `missav.<TLD>` 域名变体，日后再换后缀也无需发版
+
 ## [4.0.0] - 2026-11-13
 
 - **与「GetAV 视频标题完整显示」脚本合并**：GetAV 的标题解除截断、列表页标题放大、订阅页三列网格卡片、title 属性补全四个功能全部并入（模块七 getav-ui）；**请先删除旧 GetAV 脚本再使用本脚本**
