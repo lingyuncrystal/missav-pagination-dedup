@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      4.0.6
+// @version      4.0.7
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、列表页标题放大、订阅页网格卡片（原 GetAV 脚本并入）
 // @author       Phaeton
 // @license      MIT
@@ -392,7 +392,7 @@
         baseUrl: 'https://api.moonshot.cn/v1',
         apiKey: '',
         model: 'kimi-k2.6',
-        mode: 'ja', // 'ja' = 日文原标题（无需 Key）；'llm' = 大模型重译（需 Key）
+        mode: 'llm', // 'ja' = 日文原标题（不翻译）；'llm' = 中文标题链（缓存 → GetAV 精校 → 大模型兜底，无 Key 也能用 GetAV 精校）
         showButton: true, // 右下角浮动「译」按钮
         titlesEnabled: true,
         dedupEnabled: true, // 翻页去重总开关（保存后刷新页面生效）
@@ -1303,8 +1303,9 @@
         panel.innerHTML =
             '<div style="font-weight:600;margin-bottom:10px">' + ({ jable: 'Jable 标题增强设置', getav: 'GetAV 增强设置' }[SITE] || 'MissAV 综合增强设置') + '</div>' +
             '<div style="margin-bottom:8px">' +
-            '<label style="display:flex;align-items:center;gap:6px;margin-bottom:4px"><input type="radio" name="mve-mode" id="mve-mode-ja" value="ja"> 日文原标题（无需 Key）</label>' +
-            '<label style="display:flex;align-items:center;gap:6px"><input type="radio" name="mve-mode" id="mve-mode-llm" value="llm"> 大模型重译（需 API Key）</label>' +
+            '<label style="display:flex;align-items:center;gap:6px;margin-bottom:4px"><input type="radio" name="mve-mode" id="mve-mode-ja" value="ja"> 日文原标题（不翻译）</label>' +
+            '<label style="display:flex;align-items:center;gap:6px"><input type="radio" name="mve-mode" id="mve-mode-llm" value="llm"> 中文标题（缓存 → GetAV 精校 → 大模型兜底）</label>' +
+            '<div style="margin:2px 0 0 22px;font-size:11px;color:#8b93a5">无需 Key：GetAV 精校中文直接显示；填 Key 后 GetAV 未收录的再走大模型</div>' +
             '</div>' +
             '<label style="display:block;margin-bottom:2px">大模型服务<br><select id="mve-provider" style="width:100%;margin-top:2px;padding:5px;border-radius:6px;border:1px solid #4c566a;background:#2e3440;color:#eceff4">' +
             PROVIDERS.map((p) => '<option value="' + p.id + '">' + p.name + '</option>').join('') +
@@ -1375,7 +1376,7 @@
             btn.style.display = config.showButton ? '' : 'none';
             saveConfig(config);
             lastError = null;
-            msg('已保存' + (config.mode === 'llm' && !config.apiKey ? '（未填 Key，将显示日文原标题）' : ''));
+            msg('已保存' + (config.mode === 'llm' && !config.apiKey ? '（未填 Key：GetAV 精校中文照常使用，未收录的保持原标题）' : ''));
             togglePanel();
             enhanceTitles();
         });
