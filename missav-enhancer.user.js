@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      3.0.0
-// @description  三合一：1) 翻页去重——列表翻页时服务端常在页边界返回重复影片，自动隐藏；2) 标题修正——默认抓取日文原版标题替换机翻中文，可选填入 Kimi(Moonshot) API Key 升级为大模型重译（演员名保留日文读音自然音译）；3) 片单网格化——播放列表页改造为分类页同款缩略图网格卡片
+// @version      3.1.0
+// @description  四合一：1) 翻页去重——列表翻页时服务端常在页边界返回重复影片，自动隐藏；2) 标题修正——默认抓取日文原版标题替换机翻中文，可选填入 Kimi(Moonshot) API Key 升级为大模型重译（演员名保留日文读音自然音译）；3) 片单网格化——播放列表页改造为分类页同款缩略图网格卡片；4) 预览独占——手机端点卡片看预览时，自动暂停上一个预览视频，同时只播一个
 // @author       lingyuncrystal
 // @license      MIT
 // @icon         https://missav.ws/favicon.ico
@@ -293,7 +293,35 @@
     }
 
     /* ================================================================
-     * 模块四 titles：标题修正（日文原标题 / Kimi 大模型重译）
+     * 模块四 preview：预览独占播放
+     * 每张卡片自带一个 <video muted loop>（display:none），手机端点卡片、
+     * 桌面端悬停时站点给它设置 preview.mp4 源并播放，但从不暂停其他卡片
+     * 的预览——连点多张卡片会多个视频同时播放，浪费流量和性能。
+     * 原理：play 事件【不冒泡】，但捕获阶段会经过祖先节点，所以在
+     * document 上以捕获方式监听即可截获所有 video 的播放；
+     * 有新预览开播时，暂停其余所有预览。只动预览视频，不碰详情页主播放器。
+     * ================================================================ */
+
+    /** 判断是否为预览视频（loop 循环或 preview.mp4 源）；详情页主播放器不符合 */
+    function isPreviewVideo(v) {
+        return v instanceof HTMLVideoElement &&
+            (v.loop || /preview/i.test(v.currentSrc || v.src || ''));
+    }
+
+    function initPreviewExclusive() {
+        document.addEventListener('play', (e) => {
+            const v = e.target;
+            if (!isPreviewVideo(v)) return;
+            document.querySelectorAll('video').forEach((other) => {
+                if (other !== v && isPreviewVideo(other) && !other.paused) {
+                    other.pause();
+                }
+            });
+        }, true); // 第三个参数 true = 捕获阶段监听
+    }
+
+    /* ================================================================
+     * 模块五 titles：标题修正（日文原标题 / Kimi 大模型重译）
      * ================================================================ */
 
     const DEFAULTS = {
@@ -305,6 +333,7 @@
         titlesEnabled: true,
         dedupEnabled: true, // 翻页去重总开关（保存后刷新页面生效）
         gridEnabled: true, // 片单网格化总开关（保存后刷新页面生效）
+        previewExclusive: true, // 预览独占：新预览播放时自动暂停上一个（保存后刷新页面生效）
     };
 
     const hasGM = typeof GM_setValue === 'function' && typeof GM_getValue === 'function';
@@ -752,7 +781,7 @@
     }
 
     /* ================================================================
-     * 模块五 settings-ui：右下角浮动「译」按钮 + 设置面板
+     * 模块六 settings-ui：右下角浮动「译」按钮 + 设置面板
      * ================================================================ */
 
     let btn, btnLabel, panel, statusDot, lastError;
@@ -800,6 +829,7 @@
             '<label style="display:flex;align-items:center;gap:6px;margin:8px 0"><input id="mve-enabled" type="checkbox"> 启用标题修正</label>' +
             '<label style="display:flex;align-items:center;gap:6px;margin:8px 0"><input id="mve-dedup" type="checkbox"> 启用翻页去重（改动后刷新页面生效）</label>' +
             '<label style="display:flex;align-items:center;gap:6px;margin:8px 0"><input id="mve-grid" type="checkbox"> 启用片单网格化（改动后刷新页面生效）</label>' +
+            '<label style="display:flex;align-items:center;gap:6px;margin:8px 0"><input id="mve-preview" type="checkbox"> 预览独占：同时只播放一个预览视频（改动后刷新页面生效）</label>' +
             '<label style="display:flex;align-items:center;gap:6px;margin:8px 0"><input id="mve-showbtn" type="checkbox"> 显示右下角「译」按钮（隐藏后可用脚本菜单打开本设置）</label>' +
             '<div style="display:flex;gap:8px;margin-top:8px">' +
             '<button id="mve-save" style="flex:1;padding:6px;border:none;border-radius:6px;background:#3b7cd7;color:#fff;cursor:pointer">保存并应用</button>' +
@@ -817,6 +847,7 @@
                 titlesEnabled: panel.querySelector('#mve-enabled').checked,
                 dedupEnabled: panel.querySelector('#mve-dedup').checked,
                 gridEnabled: panel.querySelector('#mve-grid').checked,
+                previewExclusive: panel.querySelector('#mve-preview').checked,
                 showButton: panel.querySelector('#mve-showbtn').checked,
             };
             btn.style.display = config.showButton ? '' : 'none';
@@ -850,6 +881,7 @@
             panel.querySelector('#mve-enabled').checked = config.titlesEnabled;
             panel.querySelector('#mve-dedup').checked = config.dedupEnabled;
             panel.querySelector('#mve-grid').checked = config.gridEnabled;
+            panel.querySelector('#mve-preview').checked = config.previewExclusive;
             panel.querySelector('#mve-showbtn').checked = config.showButton;
             if (lastError) msg('上次出错：' + lastError);
             else msg(config.mode === 'llm' && !config.apiKey ? '重译模式需填 Kimi(Moonshot) API Key' : '');
@@ -858,7 +890,7 @@
 
     /* ================================================================
      * 启动与监听
-     * 顺序：rescue → grid（片单页先改造 DOM）→ dedup → titles。
+     * 顺序：rescue → grid（片单页先改造 DOM）→ dedup → preview → titles。
      * DOM 变化共用一个 body 级 MutationObserver，回调里分发两个
      * 防抖任务：纠正 MissAV Plus 筛选条错位 + 标题缓存回写。
      * ================================================================ */
@@ -874,6 +906,7 @@
         rescueChallengePage();
         if (isPlaylistPage && config.gridEnabled) waitFor(applyGridLayout);
         if (config.dedupEnabled) waitFor(dedup);
+        if (config.previewExclusive) initPreviewExclusive();
         buildUI();
         if (config.titlesEnabled) {
             // 等去重和首屏渲染稳定后再处理标题
