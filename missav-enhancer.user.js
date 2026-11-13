@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      3.2.1
+// @version      3.3.0
 // @description  四合一：1) 翻页去重——列表翻页时服务端常在页边界返回重复影片，自动隐藏；2) 标题修正——默认抓取日文原版标题替换机翻中文，可选填入 Kimi(Moonshot) API Key 升级为大模型重译（演员名保留日文读音自然音译）；3) 片单网格化——播放列表页改造为分类页同款缩略图网格卡片；4) 预览独占——手机端点卡片看预览时，自动暂停上一个预览视频，同时只播一个
 // @author       lingyuncrystal
 // @license      MIT
@@ -858,6 +858,12 @@
             '<button id="mve-save" style="flex:1;padding:6px;border:none;border-radius:6px;background:#3b7cd7;color:#fff;cursor:pointer">保存并应用</button>' +
             '<button id="mve-clear" style="padding:6px 10px;border:1px solid #4c566a;border-radius:6px;background:transparent;color:#d7dee9;cursor:pointer">清缓存</button>' +
             '</div>' +
+            '<div style="display:flex;gap:8px;margin-top:8px">' +
+            '<button id="mve-export" style="flex:1;padding:6px;border:1px solid #4c566a;border-radius:6px;background:transparent;color:#d7dee9;cursor:pointer">导出配置+缓存</button>' +
+            '<button id="mve-import" style="flex:1;padding:6px;border:1px solid #4c566a;border-radius:6px;background:transparent;color:#d7dee9;cursor:pointer">导入</button>' +
+            '<input id="mve-import-file" type="file" accept=".json,application/json" style="display:none">' +
+            '</div>' +
+            '<div style="margin-top:6px;font-size:11px;color:#8b93a5">导出文件含明文 API Key，注意保管；可存入 iCloud 云盘跨浏览器导入</div>' +
             '<div id="mve-msg" style="margin-top:8px;font-size:12px;color:#9db8dd;min-height:14px"></div>';
         document.body.appendChild(panel);
 
@@ -885,6 +891,64 @@
             saveCache(cache);
             msg('缓存已清空');
         });
+        panel.querySelector('#mve-export').addEventListener('click', exportBackup);
+        const importFile = panel.querySelector('#mve-import-file');
+        panel.querySelector('#mve-import').addEventListener('click', () => importFile.click());
+        importFile.addEventListener('change', () => {
+            if (importFile.files && importFile.files[0]) importBackup(importFile.files[0]);
+            importFile.value = ''; // 允许重复导入同一个文件
+        });
+    }
+
+    /* ---------------- 导出 / 导入（跨浏览器迁移，文件可存 iCloud 云盘） ---------------- */
+
+    function exportBackup() {
+        const data = {
+            app: 'missav-enhancer',
+            version: '3.3.0',
+            exportedAt: new Date().toISOString(),
+            config,
+            cache,
+        };
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'missav-enhancer-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 10000); // 延迟回收，避免 Safari 下载失败
+        msg('已导出：配置 + ' + Object.keys(cache).length + ' 条缓存（含 API Key，注意保管）');
+    }
+
+    function importBackup(file) {
+        const reader = new FileReader();
+        reader.onload = () => {
+            try {
+                const data = JSON.parse(reader.result);
+                if (!data || typeof data !== 'object' || (!data.config && !data.cache)) {
+                    throw new Error('不是有效的备份文件');
+                }
+                if (data.config && typeof data.config === 'object') {
+                    // Object.assign 补齐新增字段默认值，旧版本备份也能安全导入
+                    config = Object.assign({}, DEFAULTS, data.config);
+                    saveConfig(config);
+                }
+                let cacheCount = 0;
+                if (data.cache && typeof data.cache === 'object') {
+                    cache = data.cache;
+                    saveCache(cache);
+                    cacheCount = Object.keys(cache).length;
+                }
+                msg('导入成功：配置 + ' + cacheCount + ' 条缓存，已生效');
+                applyCached(collectCards()); // 标题立即按导入的配置/缓存回写
+                enhanceTitles();
+            } catch (e) {
+                msg('导入失败：' + e.message);
+            }
+        };
+        reader.onerror = () => msg('导入失败：文件读取错误');
+        reader.readAsText(file);
     }
 
     function msg(t) {

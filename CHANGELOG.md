@@ -1,5 +1,9 @@
 # Changelog
 
+## [3.3.0] - 2026-11-13
+
+- 新增「导出 / 导入配置+缓存」：设置面板一键导出 JSON 备份（含 API Key 与全部标题缓存），可存入 iCloud 云盘后在其他浏览器导入，跨浏览器迁移不再依赖 Tampermonkey 云同步；导入做格式校验并立即生效
+
 ## [3.2.1] - 2026-11-13
 
 - 新增 @updateURL/@downloadURL 指向 GitHub raw——更新直接走 GitHub，不再依赖国内访问不稳定的 Sleazyfork 更新服务器
