@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      3.4.1
+// @version      3.5.0
 // @description  MissAV 四合一 + Jable 标题增强：1) 翻页去重——列表翻页时服务端常在页边界返回重复影片，自动隐藏；2) 标题修正——MissAV 抓取日文原版标题替换机翻中文，可选填大模型 API Key 升级为重译（内置 Kimi/DeepSeek/OpenAI/GLM 预设）；Jable 中文标题自动在封面加「字幕」标识，非中文标题大模型翻译为中文；3) 片单网格化——播放列表页改造为分类页同款缩略图网格卡片；4) 预览独占——手机端点卡片看预览时，自动暂停上一个预览视频，同时只播一个
 // @author       lingyuncrystal
 // @license      MIT
@@ -453,7 +453,8 @@
         const storedVer = hasGM ? GM_getValue(verKey, 0) : Number(localStorage.getItem('mve-prompt-ver') || 0);
         if (storedVer !== PROMPT_VERSION) {
             Object.keys(cache).forEach((k) => {
-                if (cache[k]) delete cache[k].zh;
+                // Jable 官方中文（zhSrc:'jable'）不是大模型产物，不随提示词升级作废
+                if (cache[k] && cache[k].zhSrc !== 'jable') delete cache[k].zh;
             });
             saveCache(cache);
             if (hasGM) GM_setValue(verKey, PROMPT_VERSION);
@@ -776,24 +777,43 @@
 
     /**
      * Jable 无需网络的 DOM 处理（初始化与 MutationObserver 回调共用）：
-     * 1) 日文原文记入缓存——中文原文【不入】缓存，否则同番号回到 MissAV
-     *    时会把中文标题当成「日文原标题」展示，污染两站共用的缓存；
-     * 2) 中文原标题的卡片封面加「字幕」徽章；
+     * 1) 日文原文记入缓存 ja 字段；
+     * 2) 中文原标题（Jable 官方繁中，意味着该片有官方中文字幕）：
+     *    封面加「字幕」徽章，且原文记入缓存 zh 字段并打 zhSrc:'jable'
+     *    标记——MissAV 同番号在重译模式下直接复用，免调大模型；
      * 3) 缓存命中回写（llm 模式译文 / ja 模式还原原文）。
-     * 注意：翻译后 DOM 显示的是中文译文，语言分类必须读缓存里的原文，
-     * 只有缓存没有记录时才看 DOM 文本。
+     * 关键约束：只有脚本没动过 DOM 时（缓存无 zh），DOM 文本才可信；
+     * 已有 zh 的卡片 DOM 显示的可能是大模型译文，绝不能据此补徽章/改标记。
      */
     function processJableDom() {
         const cards = collectJableCards();
         let changed = false;
         cards.forEach(({ slug, anchor, box }) => {
-            if (cache[slug] && cache[slug].ja) return; // 已有原文记录（必为日文）
+            const hit = cache[slug];
+            if (hit && hit.ja) {
+                // 已知日文原标题的卡片。zh 未填时 DOM 仍是原文（未被翻译），
+                // 此时若读到中文原文，说明该片其实有官方中文字幕——补记 zh
+                if (!hit.zh) {
+                    const orig = anchor.textContent.trim();
+                    if (classifyTitle(orig) === 'cn') {
+                        ensureSubBadge(box);
+                        cache[slug] = Object.assign(hit, { zh: orig, zhSrc: 'jable' });
+                        changed = true;
+                    }
+                }
+                return;
+            }
             const orig = anchor.textContent.trim();
             const lang = classifyTitle(orig);
             if (lang === 'cn') {
                 ensureSubBadge(box);
+                if (!hit || hit.zh !== orig) {
+                    // 只写 zh 不碰 ja——避免「日文原标题」模式错显中文
+                    cache[slug] = Object.assign(hit || {}, { zh: orig, zhSrc: 'jable' });
+                    changed = true;
+                }
             } else if (lang === 'ja') {
-                cache[slug] = Object.assign(cache[slug] || {}, { ja: orig });
+                cache[slug] = Object.assign(hit || {}, { ja: orig });
                 changed = true;
             }
         });
@@ -1116,7 +1136,7 @@
     function exportBackup() {
         const data = {
             app: 'missav-enhancer',
-            version: '3.4.1',
+            version: '3.5.0',
             exportedAt: new Date().toISOString(),
             config,
             cache,
