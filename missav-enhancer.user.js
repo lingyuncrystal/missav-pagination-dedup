@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      4.0.8
+// @version      4.0.9
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、列表页标题放大、订阅页网格卡片（原 GetAV 脚本并入）
 // @author       Phaeton
 // @license      MIT
@@ -23,6 +23,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_registerMenuCommand
 // @connect      getav.net
+// @connect      jable.tv
 // @connect      api.moonshot.cn
 // @connect      api.deepseek.com
 // @connect      api.openai.com
@@ -629,7 +630,7 @@
      * 油猴 GM_xhr 跨站 GET 即可拿到，无需 iframe、无 Cloudflare。
      * 未收录的番号记负缓存 getavMiss（7 天），避免每次翻页重复查询。 */
 
-    const GETAV_MISS_TTL = 7 * 24 * 3600 * 1000; // 负缓存 7 天（新片可能随后收录）
+    const MISS_TTL = 7 * 24 * 3600 * 1000; // 负缓存 7 天（新片可能随后收录）；GetAV/Jable 两源共用
 
     /** 跨站 GET，返回 { status, text }；网络层失败 reject */
     function httpGet(url) {
@@ -670,7 +671,7 @@
      */
     async function fetchGetavTitle(slug) {
         const hit = cache[slug];
-        if (hit && hit.getavMiss && Date.now() - hit.getavMiss < GETAV_MISS_TTL) return null;
+        if (hit && hit.getavMiss && Date.now() - hit.getavMiss < MISS_TTL) return null;
         try {
             const r = await httpGet('https://getav.net/zh/videos/' + encodeURIComponent(slug));
             if (r.status < 200 || r.status >= 300) {
@@ -690,16 +691,56 @@
         }
     }
 
+    /* ---------------- Jable 官方中文标题源（优先级第二） ----------------
+     * Jable 视频页（/videos/<番号小写>/）服务端直出官方繁中标题（h4），
+     * 未收录返回干净的 HTTP 404。与 GetAV 同规则：标题必须含番号本体，
+     * 负缓存只认 404，异常页面不写。 */
+
+    /** 从 Jable 视频页 HTML 解析官方中文标题；404 / 未收录返回 null */
+    function parseJableTitle(html, slug) {
+        if (!html) return null;
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const h4 = doc.querySelector('h4');
+        if (!h4) return null;
+        const t = h4.textContent.trim();
+        if (!t) return null;
+        // 同 GetAV 防污染：标题必须含番号本体
+        if (slug && t.toLowerCase().indexOf(slug) === -1) return null;
+        return t;
+    }
+
     /**
-     * 第 2 层解析：批量查 GetAV（并发 ≤2），命中的写缓存并即时回写页面。
-     * 返回未命中的番号数组，交给下一层（日文抓取 + 大模型）。
+     * 按番号查 Jable 官方中文标题。命中返回标题文本；未收录返回 null 并写负缓存；
+     * 网络失败 / 异常页面返回 null 但【不写】负缓存（下次重试）。
      */
-    async function resolveViaGetav(slugs) {
+    async function fetchJableTitle(slug) {
+        const hit = cache[slug];
+        if (hit && hit.jableMiss && Date.now() - hit.jableMiss < MISS_TTL) return null;
+        try {
+            const r = await httpGet('https://jable.tv/videos/' + encodeURIComponent(slug) + '/');
+            if (r.status < 200 || r.status >= 300) {
+                if (r.status === 404) {
+                    cache[slug] = Object.assign(cache[slug] || {}, { jableMiss: Date.now() });
+                }
+                return null;
+            }
+            return parseJableTitle(r.text, slug) || null;
+        } catch (e) {
+            log('Jable 查询失败 ' + slug, e);
+            return null;
+        }
+    }
+
+    /**
+     * 批量解析：批量查 GetAV（并发 ≤2），命中的按来源优先级写缓存并即时回写页面。
+     * 返回未命中的番号数组，交给下一层。
+     */
+    async function resolveVia(slugs, fetchTitle, src) {
         const missed = [];
         for (let i = 0; i < slugs.length; i += 2) {
             await Promise.all(slugs.slice(i, i + 2).map(async (s) => {
-                const title = await fetchGetavTitle(s);
-                if (title && setZh(s, title, 'getav')) {
+                const title = await fetchTitle(s);
+                if (title && setZh(s, title, src)) {
                     saveCache(cache);
                     applyCached(collectCards());
                 }
@@ -708,6 +749,8 @@
         }
         return missed;
     }
+    const resolveViaGetav = (slugs) => resolveVia(slugs, fetchGetavTitle, 'getav');
+    const resolveViaJable = (slugs) => resolveVia(slugs, fetchJableTitle, 'jable');
 
     /* ---------------- Kimi 大模型翻译 ---------------- */
 
@@ -1085,7 +1128,7 @@
         return cards;
     }
 
-    /** GetAV 主流程：本站中文直接入缓存；日文原标题走「缓存 → 大模型」（不查自己） */
+    /** GetAV 主流程：本站中文直接入缓存；日文原标题走「缓存 → Jable → 大模型」（不查自己） */
     async function enhanceGetavTitles() {
         if (running) {
             rerunAfter = true;
@@ -1093,21 +1136,25 @@
         }
         const cards = processGetavDom();
         if (!cards.length) return;
-        if (config.mode !== 'llm' || !config.apiKey) return;
-        const todo = [...new Set(cards.map((c) => c.slug))]
-            .filter((s) => cache[s] && cache[s].ja && !cache[s].zh);
-        if (!todo.length) return;
+        if (config.mode !== 'llm') return;
         running = true;
         setButtonState('translating');
         try {
-            for (let i = 0; i < todo.length; i += 20) {
-                const chunk = todo.slice(i, i + 20);
-                const zhArr = await translateBatch(chunk.map((s) => cache[s].ja));
-                chunk.forEach((s, j) => {
-                    setZh(s, zhArr[j], 'llm');
-                });
-                saveCache(cache);
-                applyCached(collectGetavCards());
+            // GetAV 上的日文原标题：先查 Jable 官方中文（无需 Key），再轮到大模型
+            const wantZh = [...new Set(cards.map((c) => c.slug))].filter((s) => !cache[s] || !cache[s].zh);
+            if (wantZh.length) await resolveViaJable(wantZh);
+            if (config.apiKey) {
+                const todo = [...new Set(cards.map((c) => c.slug))]
+                    .filter((s) => cache[s] && cache[s].ja && !cache[s].zh);
+                for (let i = 0; i < todo.length; i += 20) {
+                    const chunk = todo.slice(i, i + 20);
+                    const zhArr = await translateBatch(chunk.map((s) => cache[s].ja));
+                    chunk.forEach((s, j) => {
+                        setZh(s, zhArr[j], 'llm');
+                    });
+                    saveCache(cache);
+                    applyCached(collectGetavCards());
+                }
             }
             lastError = null;
             setButtonState('done');
@@ -1204,9 +1251,12 @@
         try {
             // 第 2 层：GetAV 精校中文源（重译模式；无需 Key；命中即缓存并显示）
             if (llmWanted && needZh.length) await resolveViaGetav(needZh);
-            // GetAV 命中的番号已有最佳中文，重译模式下连日文原文都不再需要——
-            // 日文抓取和大模型只为「GetAV 也没收录」的番号兜底
-            const needJa2 = llmWanted ? needJa.filter((s) => !cache[s].zh) : needJa;
+            // 第 2.5 层：Jable 官方中文源——GetAV 未收录的新片常能在 Jable 找到官方繁中
+            const stillNeedZh = llmWanted ? needZh.filter((s) => !cache[s] || !cache[s].zh) : [];
+            if (stillNeedZh.length) await resolveViaJable(stillNeedZh);
+            // GetAV/Jable 命中的番号已有可靠中文，重译模式下连日文原文都不再需要——
+            // 日文抓取和大模型只为「两个中文源都没收录」的番号兜底
+            const needJa2 = llmWanted ? needJa.filter((s) => !cache[s] || !cache[s].zh) : needJa;
             if (needJa2.length) {
                 const isDetail = !!document.querySelector('h1') && !document.querySelector('.thumbnail');
                 const jaUrl = isDetail ? jaDetailUrl(needJa2[0]) : jaListUrl();
@@ -1308,8 +1358,8 @@
             '<div style="font-weight:600;margin-bottom:10px">' + ({ jable: 'Jable 标题增强设置', getav: 'GetAV 增强设置' }[SITE] || 'MissAV 综合增强设置') + '</div>' +
             '<div style="margin-bottom:8px">' +
             '<label style="display:flex;align-items:center;gap:6px;margin-bottom:4px"><input type="radio" name="mve-mode" id="mve-mode-ja" value="ja"> 日文原标题（不翻译）</label>' +
-            '<label style="display:flex;align-items:center;gap:6px"><input type="radio" name="mve-mode" id="mve-mode-llm" value="llm"> 中文标题（缓存 → GetAV 精校 → 大模型兜底）</label>' +
-            '<div style="margin:2px 0 0 22px;font-size:11px;color:#8b93a5">无需 Key：GetAV 精校中文直接显示；填 Key 后 GetAV 未收录的再走大模型</div>' +
+            '<label style="display:flex;align-items:center;gap:6px"><input type="radio" name="mve-mode" id="mve-mode-llm" value="llm"> 中文标题（缓存 → GetAV / Jable → 大模型兜底）</label>' +
+            '<div style="margin:2px 0 0 22px;font-size:11px;color:#8b93a5">无需 Key：GetAV 精校 / Jable 官方中文直接显示；填 Key 后都未收录的再走大模型</div>' +
             '</div>' +
             '<label style="display:block;margin-bottom:2px">大模型服务<br><select id="mve-provider" style="width:100%;margin-top:2px;padding:5px;border-radius:6px;border:1px solid #4c566a;background:#2e3440;color:#eceff4">' +
             PROVIDERS.map((p) => '<option value="' + p.id + '">' + p.name + '</option>').join('') +
@@ -1424,6 +1474,19 @@
                        : '，但解析不到合规标题（异常页面，前 100 字：' + r.text.slice(0, 100).replace(/\s+/g, ' ') + '）');
             } catch (e) {
                 lines[lines.length - 1] = 'GetAV 查询：✗ 失败——' + e.message;
+            }
+            out.textContent = lines.join('\n');
+        }
+        if (SITE !== 'jable' && typeof GM_xmlhttpRequest === 'function') {
+            add('Jable 查询', '测试中…');
+            try {
+                const r = await httpGet('https://jable.tv/videos/jur-857/');
+                const t = parseJableTitle(r.text, 'jur-857');
+                lines[lines.length - 1] = 'Jable 查询：HTTP ' + r.status +
+                    (t ? '，✓ 标题：' + t.slice(0, 40)
+                       : '，但解析不到合规标题（异常页面，前 100 字：' + r.text.slice(0, 100).replace(/\s+/g, ' ') + '）');
+            } catch (e) {
+                lines[lines.length - 1] = 'Jable 查询：✗ 失败——' + e.message;
             }
             out.textContent = lines.join('\n');
         }

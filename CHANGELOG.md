@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.0.9] - 2026-11-13
+
+- **新增 Jable 主动查询层**：中文标题链升级为「缓存 → GetAV 精校 → **Jable 官方繁中** → 大模型」——GetAV 未收录的新片按番号查询 Jable 视频页（服务端直出 h4 官方中文，HTTP 404 信号干净，zhSrc 优先级 2 仅次于 GetAV 精校）。MissAV 和 GetAV 两站流程都接入；Jable 本站不查自己。负缓存与防污染校验（标题必须含番号）与 GetAV 同规则
+- **修复运行时 TypeError 中断**：`undefined is not an object (evaluating 'cache[s].zh')`——GetAV 网络失败的番号不会创建缓存条目，后续过滤裸取 `cache[s].zh` 直接抛错，整轮翻译中断（在移动网络等不稳定环境下高发），已补空值保护
+- 诊断新增「Jable 查询」实测项；面板模式说明更新为完整链路
+- 发布脚本：推送与线上校验默认走代理（`PROXY_URL` 可覆盖），失败退回直连
+
 ## [4.0.8] - 2026-11-13
 
 - **修复手机端设置面板超出屏幕且无法滚动**：面板加高度封顶（`calc(100dvh - 150px)`，vh 兜底适配移动浏览器地址栏）与内部滚动（`-webkit-overflow-scrolling:touch` + `overscroll-behavior:contain` 防滚动穿透），宽度加 `max-width: calc(100vw - 32px)` 防窄屏溢出

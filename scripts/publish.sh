@@ -136,11 +136,19 @@ else
 fi
 
 # ---------- 7. 推送 GitHub ----------
+# 直连经常被断（Empty reply / Connection reset / 长时间挂起）：
+# 先试代理（可用 PROXY_URL 覆盖），失败再退回直连
+PROXY="${PROXY_URL:-http://127.0.0.1:33210}"
 if [ "$DRY_RUN" = 1 ]; then
     ok "将推送 $BRANCH 与 $tag 到 $REMOTE"
 else
-    git push "$REMOTE" "$BRANCH" "$tag"
-    ok "已推送到 GitHub"
+    if git -c http.proxy="$PROXY" push "$REMOTE" "$BRANCH" "$tag"; then
+        ok "已推送到 GitHub（走代理 $PROXY）"
+    else
+        warn "代理推送失败，退回直连重试…"
+        git push "$REMOTE" "$BRANCH" "$tag"
+        ok "已推送到 GitHub（直连）"
+    fi
 fi
 
 # ---------- 8. GitHub webhook（可选，需 SLEAZYFORK_WEBHOOK_URL） ----------
@@ -164,7 +172,8 @@ fi
 # ---------- 9. 线上校验（尽力而为） ----------
 info "校验线上文件…"
 sleep 2
-remote_version=$(curl -fsSL --max-time 10 "$RAW_URL" 2>/dev/null \
+remote_version=$( { curl -fsSL --max-time 10 --proxy "$PROXY" "$RAW_URL" 2>/dev/null \
+    || curl -fsSL --max-time 10 "$RAW_URL" 2>/dev/null; } \
     | grep -m1 '^// @version' | sed -E 's|^// *@version +||' | tr -d '[:space:]' || true)
 if [ -z "$remote_version" ]; then
     warn "无法访问 ${RAW_URL}（网络受限？），跳过校验，请稍后在浏览器确认"
