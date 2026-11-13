@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      4.0.10
+// @version      4.0.11
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、列表页标题放大、订阅页网格卡片（原 GetAV 脚本并入）；6) Jable 标题完整显示不省略（同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -694,7 +694,26 @@
     /* ---------------- Jable 官方中文标题源（优先级第二） ----------------
      * Jable 视频页（/videos/<番号小写>/）服务端直出官方繁中标题（h4），
      * 未收录返回干净的 HTTP 404。与 GetAV 同规则：标题必须含番号本体，
-     * 负缓存只认 404，异常页面不写。 */
+     * 负缓存只认 404，异常页面不写。
+     * 注意：Jable 整站挂 Cloudflare，GM_xhr 拿不到 cf_clearance（桌面
+     * Tampermonkey 与移动脚本管理器实测均被 403 挑战页拦截）。检测到
+     * CF 拦截后【本会话内停用 Jable 层】——否则 403 不写负缓存，每页都会
+     * 对每个未命中番号重复发注定失败的请求。不写持久标记：CF 按 IP/网络
+     * 环境触发，换网络后可能恢复，下次会话自动重试。 */
+
+    let jableBlocked = false; // 会话级停用标记；同时镜像到 <html> dataset 便于诊断/测试读取
+
+    function markJableBlocked() {
+        if (jableBlocked) return;
+        jableBlocked = true;
+        document.documentElement.dataset.mveJableBlocked = '1';
+        log('Jable 查询被 Cloudflare 人机验证拦截，本会话停用 Jable 层（中文标题降级为大模型兜底）');
+    }
+
+    /** 判断响应是否为 Cloudflare 人机验证挑战页 */
+    function isCfChallenge(r) {
+        return r.status === 403 && /just a moment|cf-chl|cloudflare/i.test(r.text || '');
+    }
 
     /** 从 Jable 视频页 HTML 解析官方中文标题；404 / 未收录返回 null */
     function parseJableTitle(html, slug) {
@@ -711,15 +730,19 @@
 
     /**
      * 按番号查 Jable 官方中文标题。命中返回标题文本；未收录返回 null 并写负缓存；
-     * 网络失败 / 异常页面返回 null 但【不写】负缓存（下次重试）。
+     * 网络失败 / 异常页面返回 null 但【不写】负缓存（下次重试）；
+     * CF 拦截返回 null 并停用本会话的 Jable 层。
      */
     async function fetchJableTitle(slug) {
+        if (jableBlocked) return null;
         const hit = cache[slug];
         if (hit && hit.jableMiss && Date.now() - hit.jableMiss < MISS_TTL) return null;
         try {
             const r = await httpGet('https://jable.tv/videos/' + encodeURIComponent(slug) + '/');
             if (r.status < 200 || r.status >= 300) {
-                if (r.status === 404) {
+                if (isCfChallenge(r)) {
+                    markJableBlocked();
+                } else if (r.status === 404) {
                     cache[slug] = Object.assign(cache[slug] || {}, { jableMiss: Date.now() });
                 }
                 return null;
@@ -1481,14 +1504,20 @@
             add('Jable 查询', '测试中…');
             try {
                 const r = await httpGet('https://jable.tv/videos/jur-857/');
-                const t = parseJableTitle(r.text, 'jur-857');
-                lines[lines.length - 1] = 'Jable 查询：HTTP ' + r.status +
-                    (t ? '，✓ 标题：' + t.slice(0, 40)
-                       : '，但解析不到合规标题（异常页面，前 100 字：' + r.text.slice(0, 100).replace(/\s+/g, ' ') + '）');
+                if (isCfChallenge(r)) {
+                    markJableBlocked();
+                    lines[lines.length - 1] = 'Jable 查询：✗ HTTP 403——Cloudflare 人机验证拦截（本环境的 GM_xhr 过不了 CF，属环境限制非脚本故障；Jable 层本会话已自动停用，中文标题由其他来源兜底）';
+                } else {
+                    const t = parseJableTitle(r.text, 'jur-857');
+                    lines[lines.length - 1] = 'Jable 查询：HTTP ' + r.status +
+                        (t ? '，✓ 标题：' + t.slice(0, 40)
+                           : '，但解析不到合规标题（异常页面，前 100 字：' + r.text.slice(0, 100).replace(/\s+/g, ' ') + '）');
+                }
             } catch (e) {
                 lines[lines.length - 1] = 'Jable 查询：✗ 失败——' + e.message;
             }
             out.textContent = lines.join('\n');
+            add('Jable 层状态', jableBlocked ? '本会话已停用（Cloudflare 拦截）' : '正常');
         }
         if (SITE === 'missav') {
             add('日文页抓取', '测试中…');
