@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      4.0.4
+// @version      4.0.5
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、列表页标题放大、订阅页网格卡片（原 GetAV 脚本并入）
 // @author       Phaeton
 // @license      MIT
@@ -483,6 +483,32 @@
         saveConfig(config);
     }
     let cache = loadCache(); // slug -> { ja, zh? }
+    // v4.0.5 一次性缓存清洗：早期版本在异常网络下可能把跳转/提示页的文本
+    // （如 h1 为 miss.ws 的页面）当作标题入库。规则：ja/zh 必须包含番号本体，
+    // 不含即判定为污染数据删除（番号键为小写，标题里的番号大小写不敏感比较）
+    try {
+        const sanitizeKey = 'cacheSanitizedV1';
+        const sanitized = hasGM ? GM_getValue(sanitizeKey, false) : localStorage.getItem('mve-sanitized-v1');
+        if (!sanitized) {
+            let removed = 0;
+            Object.keys(cache).forEach((k) => {
+                const c = cache[k];
+                if (!c) return;
+                ['ja', 'zh'].forEach((f) => {
+                    if (c[f] && String(c[f]).toLowerCase().indexOf(k) === -1) {
+                        delete c[f];
+                        removed++;
+                    }
+                });
+            });
+            if (removed) {
+                saveCache(cache);
+                log('缓存清洗完成，移除疑似污染条目', removed, '个');
+            }
+            if (hasGM) GM_setValue(sanitizeKey, true);
+            else localStorage.setItem('mve-sanitized-v1', '1');
+        }
+    } catch {}
     // 提示词升级后丢弃旧译文（日文原标题保留，无需重新抓取）
     try {
         const verKey = 'promptVersion';
@@ -559,7 +585,14 @@
                     // 详情页：等 h1 出现
                     const h1 = doc.querySelector('h1');
                     const slug = slugFromHref(url);
-                    if (h1 && slug) finish(resolve, { [slug]: h1.textContent.trim() });
+                    if (h1 && slug) {
+                        const t = h1.textContent.trim();
+                        // MissAV 详情页 h1 必含番号；不含说明 iframe 被重定向到了
+                        // 跳转/提示页（如某些网络环境下 h1 为 miss.ws 的页面），
+                        // 直接放弃本番号，绝不入库污染缓存
+                        if (t.toLowerCase().indexOf(slug) !== -1) finish(resolve, { [slug]: t });
+                        else finish(resolve, {});
+                    }
                 } else {
                     // 列表页：必须等到卡片标题锚点渲染完成（页面是客户端渲染，
                     // 过早解析会只拿到 h1，导致 slug 对不上）
@@ -571,7 +604,11 @@
                     // 详情页被当作列表抓取其自身 h1（补当前页番号）
                     const own = slugFromHref(url);
                     const h1 = doc.querySelector('h1');
-                    if (h1 && own && /\d/.test(own) && !map[own]) map[own] = h1.textContent.trim();
+                    if (h1 && own && /\d/.test(own) && !map[own]) {
+                        const t = h1.textContent.trim();
+                        // 同上：h1 必须含番号本体，防跳转/提示页污染
+                        if (t.toLowerCase().indexOf(own) !== -1) map[own] = t;
+                    }
                     if (Object.keys(map).length >= 3 || (own && map[own])) {
                         finish(resolve, map);
                         return;
@@ -613,19 +650,23 @@
     }
 
     /** 从 GetAV 视频页 HTML 解析中文标题；404 / 未收录返回 null */
-    function parseGetavTitle(html) {
+    function parseGetavTitle(html, slug) {
         if (!html) return null;
         const doc = new DOMParser().parseFromString(html, 'text/html');
         const h1 = doc.querySelector('h1');
         if (!h1) return null; // SPA 壳或兜底首页
         const t = h1.textContent.trim();
         if (!t || t === '404' || /页面未找到/.test(t)) return null;
+        // 异常页面防污染：GetAV 详情页 h1 必含番号本体；不含说明拿到的是
+        // 跳转/提示/劫持页（如某些网络下被劫持到标题为 miss.ws 的页面），
+        // 绝不能入库，否则标题会被替换成垃圾文本
+        if (slug && t.toLowerCase().indexOf(slug) === -1) return null;
         return t;
     }
 
     /**
      * 按番号查 GetAV 中文标题。命中返回标题文本；未收录返回 null 并写负缓存；
-     * 网络失败返回 null 但【不写】负缓存（下次重试）。
+     * 网络失败 / 异常页面返回 null 但【不写】负缓存（下次重试）。
      */
     async function fetchGetavTitle(slug) {
         const hit = cache[slug];
@@ -639,12 +680,10 @@
                 }
                 return null;
             }
-            const title = parseGetavTitle(r.text);
-            if (!title) {
-                cache[slug] = Object.assign(cache[slug] || {}, { getavMiss: Date.now() });
-                return null;
-            }
-            return title;
+            const title = parseGetavTitle(r.text, slug);
+            // 200 但解析不出合规标题 = 异常页面（劫持/跳转/软错误），
+            // 不是「确认未收录」——绝不写负缓存，否则一次网络波动把番号打入冷宫 7 天
+            return title || null;
         } catch (e) {
             log('GetAV 查询失败 ' + slug, e);
             return null;
