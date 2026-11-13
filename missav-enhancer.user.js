@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      4.0.5
+// @version      4.0.6
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、列表页标题放大、订阅页网格卡片（原 GetAV 脚本并入）
 // @author       Phaeton
 // @license      MIT
@@ -1331,6 +1331,10 @@
             '<input id="mve-import-file" type="file" accept=".json,application/json" style="display:none">' +
             '</div>' +
             '<div style="margin-top:6px;font-size:11px;color:#8b93a5">导出文件含明文 API Key，注意保管；可存入 iCloud 云盘跨浏览器导入</div>' +
+            '<div style="display:flex;gap:8px;margin-top:8px">' +
+            '<button id="mve-diag" style="flex:1;padding:6px;border:1px solid #4c566a;border-radius:6px;background:transparent;color:#d7dee9;cursor:pointer">诊断（GetAV 链路）</button>' +
+            '</div>' +
+            '<pre id="mve-diag-out" style="display:none;margin-top:6px;padding:8px;border-radius:6px;background:#12151d;color:#9db8dd;font-size:11px;white-space:pre-wrap;word-break:break-all;max-height:180px;overflow:auto"></pre>' +
             '<div id="mve-msg" style="margin-top:8px;font-size:12px;color:#9db8dd;min-height:14px"></div>';
         document.body.appendChild(panel);
 
@@ -1387,6 +1391,48 @@
             if (importFile.files && importFile.files[0]) importBackup(importFile.files[0]);
             importFile.value = ''; // 允许重复导入同一个文件
         });
+        panel.querySelector('#mve-diag').addEventListener('click', runDiagnostics);
+    }
+
+    /* ---------------- 环境诊断（面板一键自检，结果可复制反馈） ---------------- */
+
+    async function runDiagnostics() {
+        const out = panel.querySelector('#mve-diag-out');
+        out.style.display = 'block';
+        const lines = [];
+        const add = (k, v) => { lines.push(k + '：' + v); out.textContent = lines.join('\n'); };
+        const ver = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '?';
+        add('脚本版本', ver + '（站点：' + SITE + '）');
+        add('GM_xhr', typeof GM_xmlhttpRequest === 'function' ? '✓ 存在' : '✗ 不存在（GetAV 跨站查询无法工作）');
+        add('GM 存储', hasGM ? '✓ 存在' : '✗ 不存在（用 localStorage 兜底，缓存不跨站共享）');
+        const keys = Object.keys(cache);
+        const zhN = keys.filter((k) => cache[k] && cache[k].zh).length;
+        const missN = keys.filter((k) => cache[k] && cache[k].getavMiss).length;
+        add('缓存', keys.length + ' 条（含中文 ' + zhN + '，GetAV 负缓存 ' + missN + '）');
+        if (SITE !== 'getav' && typeof GM_xmlhttpRequest === 'function') {
+            add('GetAV 查询', '测试中…');
+            try {
+                const r = await httpGet('https://getav.net/zh/videos/jur-857');
+                const t = parseGetavTitle(r.text, 'jur-857');
+                lines[lines.length - 1] = 'GetAV 查询：HTTP ' + r.status +
+                    (t ? '，✓ 标题：' + t.slice(0, 40)
+                       : '，但解析不到合规标题（异常页面，前 100 字：' + r.text.slice(0, 100).replace(/\s+/g, ' ') + '）');
+            } catch (e) {
+                lines[lines.length - 1] = 'GetAV 查询：✗ 失败——' + e.message;
+            }
+            out.textContent = lines.join('\n');
+        }
+        if (SITE === 'missav') {
+            add('日文页抓取', '测试中…');
+            try {
+                const m = await fetchJaTitles(jaDetailUrl('jur-857'), true);
+                lines[lines.length - 1] = '日文页抓取：' + (m['jur-857'] ? '✓ ' + m['jur-857'].slice(0, 40) : '✗ 页面打开但无合规标题（可能被重定向）');
+            } catch (e) {
+                lines[lines.length - 1] = '日文页抓取：✗ ' + e.message;
+            }
+            out.textContent = lines.join('\n');
+        }
+        add('提示', '以上结果可截图发给作者排查');
     }
 
     /* ---------------- 导出 / 导入（跨浏览器迁移，文件可存 iCloud 云盘） ---------------- */
@@ -1394,7 +1440,7 @@
     function exportBackup() {
         const data = {
             app: 'missav-enhancer',
-            version: '4.0.0',
+            version: (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || 'unknown',
             exportedAt: new Date().toISOString(),
             config,
             cache,
