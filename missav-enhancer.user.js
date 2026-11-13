@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      3.1.0
+// @version      3.2.0
 // @description  四合一：1) 翻页去重——列表翻页时服务端常在页边界返回重复影片，自动隐藏；2) 标题修正——默认抓取日文原版标题替换机翻中文，可选填入 Kimi(Moonshot) API Key 升级为大模型重译（演员名保留日文读音自然音译）；3) 片单网格化——播放列表页改造为分类页同款缩略图网格卡片；4) 预览独占——手机端点卡片看预览时，自动暂停上一个预览视频，同时只播一个
 // @author       lingyuncrystal
 // @license      MIT
@@ -294,12 +294,17 @@
 
     /* ================================================================
      * 模块四 preview：预览独占播放
-     * 每张卡片自带一个 <video muted loop>（display:none），手机端点卡片、
-     * 桌面端悬停时站点给它设置 preview.mp4 源并播放，但从不暂停其他卡片
-     * 的预览——连点多张卡片会多个视频同时播放，浪费流量和性能。
+     * 每张卡片自带一个 <video muted loop>（display:none），站点用 Alpine
+     * 管理预览：桌面悬停驱动 showPreview，手机点按调用 clickPreview(uuid)
+     * 把卡片 id 存进 holdPreviews 数组「保持预览」——video 和封面 img 的
+     * hidden class 都由这个数组驱动。站点从不清理旧 id，连点多张卡片
+     * 就会多个预览同时挂着播放，浪费流量和性能。
      * 原理：play 事件【不冒泡】，但捕获阶段会经过祖先节点，所以在
      * document 上以捕获方式监听即可截获所有 video 的播放；
-     * 有新预览开播时，暂停其余所有预览。只动预览视频，不碰详情页主播放器。
+     * 新预览开播时：1) 暂停其余预览视频；2) 把其余 id 从 holdPreviews
+     * 中移除，让 Alpine 重渲染自动藏起旧视频、还原封面图。
+     * （不能只改 class——Alpine 下次重渲染会按旧状态改回去）
+     * 只动预览视频，不碰详情页主播放器。
      * ================================================================ */
 
     /** 判断是否为预览视频（loop 循环或 preview.mp4 源）；详情页主播放器不符合 */
@@ -312,10 +317,26 @@
         document.addEventListener('play', (e) => {
             const v = e.target;
             if (!isPreviewVideo(v)) return;
+
+            // 1. 暂停其余预览视频
             document.querySelectorAll('video').forEach((other) => {
                 if (other !== v && isPreviewVideo(other) && !other.paused) {
                     other.pause();
                 }
+            });
+
+            // 2. 还原封面：从 Alpine 组件数据栈里找 holdPreviews，只保留当前 id。
+            //    原地 splice 修改，确保 Alpine 响应式捕获并重渲染 class。
+            const keepId = (v.id || '').replace(/^preview-/, '');
+            if (!keepId) return;
+            document.querySelectorAll('[x-data]').forEach((el) => {
+                (el._x_dataStack || []).forEach((frame) => {
+                    if (!frame || !Array.isArray(frame.holdPreviews)) return;
+                    const rest = frame.holdPreviews.filter((id) => id === keepId);
+                    if (rest.length !== frame.holdPreviews.length) {
+                        frame.holdPreviews.splice(0, frame.holdPreviews.length, ...rest);
+                    }
+                });
             });
         }, true); // 第三个参数 true = 捕获阶段监听
     }

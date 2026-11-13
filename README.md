@@ -21,7 +21,7 @@ MissAV 列表页码翻页时，服务端常在页边界返回与之前页面重�
 
 ## 功能四：预览独占
 
-手机端点卡片、桌面端悬停卡片时会播放预览视频，但站点不会暂停上一张卡片的预览——连点多张会多个视频同时播放，浪费流量。本功能在新预览开播时自动暂停其余预览视频，同时只播一个；只作用于卡片预览，不影响详情页主播放器。
+手机端点卡片、桌面端悬停卡片时会播放预览视频，但站点不会收起上一张卡片的预览——连点多张会多个视频同时挂着播放，浪费流量。本功能在新预览开播时自动暂停其余预览、并让旧卡片**还原显示封面图**；只作用于卡片预览，不影响详情页主播放器。
 
 ## 设置面板
 
@@ -50,13 +50,13 @@ https://missav.com/*
 | rescue | 反爬自救：站点偶尔返回永久空白的 JS 验证页，检测后给 URL 加无用参数刷新绕过 |
 | grid | 片单网格化：复用站点自带 Tailwind 工具类；只调 class 与节点位置，不破坏 Alpine.js；MissAV Plus 注入错位的筛选条自动移回 |
 | dedup | 翻页去重：从 URL `?page=` 取页码，按「路径 + 查询参数」区分列表；重复卡片 `display: none` 隐藏，`sessionStorage` 会话级存储 |
-| preview | 预览独占：`play` 事件不冒泡，在 document 捕获阶段监听；新预览开播时暂停其余预览视频（识别特征：`loop` 循环或 preview.mp4 源），不碰详情页主播放器 |
+| preview | 预览独占：`play` 事件不冒泡，在 document 捕获阶段监听；新预览开播时暂停其余预览，并把旧卡片 id 从 Alpine `holdPreviews` 状态数组移除以还原封面（识别特征：`loop` 循环或 preview.mp4 源），不碰详情页主播放器 |
 | titles | 标题修正：隐藏 iframe 抓 `/ja/` 页面（站点有 Cloudflare 人机验证，fetch/XHR 拿不到未缓存页面，iframe 让浏览器自己完成验证）；大模型重译兼容 OpenAI 格式 `/chat/completions`（默认 Kimi `kimi-k2.6`，404 时自动发现可用模型），每批 ≤20 条，`response_format` 不支持时自动降级 |
 | settings-ui | 浮动按钮 + 设置面板；`GM_setValue` 持久缓存 slug → 日文/中文标题；MissAV Plus 重渲染标题时由 MutationObserver 防抖回写 |
 
 ## 版本
 
-当前版本：**3.1.0**，详见 [CHANGELOG](./CHANGELOG.md)。
+当前版本：**3.2.0**，详见 [CHANGELOG](./CHANGELOG.md)。
 
 ## 发布流程
 
