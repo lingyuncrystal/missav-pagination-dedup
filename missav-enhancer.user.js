@@ -1,11 +1,13 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      3.2.0
+// @version      3.2.1
 // @description  四合一：1) 翻页去重——列表翻页时服务端常在页边界返回重复影片，自动隐藏；2) 标题修正——默认抓取日文原版标题替换机翻中文，可选填入 Kimi(Moonshot) API Key 升级为大模型重译（演员名保留日文读音自然音译）；3) 片单网格化——播放列表页改造为分类页同款缩略图网格卡片；4) 预览独占——手机端点卡片看预览时，自动暂停上一个预览视频，同时只播一个
 // @author       lingyuncrystal
 // @license      MIT
 // @icon         https://missav.ws/favicon.ico
+// @updateURL    https://raw.githubusercontent.com/lingyuncrystal/missav-pagination-dedup/main/missav-enhancer.user.js
+// @downloadURL  https://raw.githubusercontent.com/lingyuncrystal/missav-pagination-dedup/main/missav-enhancer.user.js
 // @match        https://missav.ws/*
 // @match        https://missav.com/*
 // @run-at       document-idle

@@ -1,5 +1,9 @@
 # Changelog
 
+## [3.2.1] - 2026-11-13
+
+- 新增 @updateURL/@downloadURL 指向 GitHub raw——更新直接走 GitHub，不再依赖国内访问不稳定的 Sleazyfork 更新服务器
+
 ## [3.2.0] - 2026-11-13
 
 - 预览独占升级：新预览开播时不再只是暂停上一个，而是把旧卡片 id 从 Alpine 的 `holdPreviews` 状态数组中移除，让旧预览视频自动隐藏、**还原显示封面图**（只改 class 会被 Alpine 重渲染改回去，必须改状态源）
