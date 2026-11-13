@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      4.0.13
+// @version      4.0.14
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、列表页标题放大、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -448,6 +448,7 @@
         if (hit.zh === zh && hit.zhSrc === src) return false;
         hit.zh = zh;
         hit.zhSrc = src;
+        hit.zhAt = Date.now(); // 写入时间：llm 译文「来源升级」按此判断新旧
         cache[slug] = hit;
         return true;
     }
@@ -630,7 +631,7 @@
      * 油猴 GM_xhr 跨站 GET 即可拿到，无需 iframe、无 Cloudflare。
      * 未收录的番号记负缓存 getavMiss（7 天），避免每次翻页重复查询。 */
 
-    const MISS_TTL = 7 * 24 * 3600 * 1000; // 负缓存 7 天（新片可能随后收录）；GetAV/Jable 两源共用
+    const MISS_TTL = 24 * 3600 * 1000; // 负缓存 24 小时（新片可能随后收录，原 7 天太久——GetAV 收录后用户长时间看不到精校标题）；GetAV/Jable 两源共用
 
     /** 跨站 GET，返回 { status, text }；网络层失败 reject */
     function httpGet(url) {
@@ -790,6 +791,28 @@
     }
     const resolveViaGetav = (slugs) => resolveVia(slugs, fetchGetavTitle, 'getav');
     const resolveViaJable = (slugs) => resolveVia(slugs, fetchJableTitle, 'jable');
+
+    /* ---------------- GetAV 查询候选（含「来源升级」） ----------------
+     * GetAV 的收录是增长的：昨天 404 的番号今天可能有了精校中字。
+     * 两类番号需要查 GetAV：
+     * 1) 尚无中文标题的——常规查询；
+     * 2) 只有旧 llm 译文的——「升级查询」：译文超过 UPGRADE_AFTER 且
+     *    近期没查过 GetAV，就重查一次，命中则以精校替换机翻
+     *    （setZh 优先级 getav > llm 自动完成替换）。
+     * 频率天然有界：404 会写 24h 负缓存，升级候选按 3 天节奏复查。 */
+    const UPGRADE_AFTER = 3 * 24 * 3600 * 1000;
+
+    function needGetavQuery(slugs) {
+        const now = Date.now();
+        return slugs.filter((s) => {
+            const hit = cache[s];
+            if (!hit || !hit.zh) return true;                                  // 无中文：常规查询
+            if (hit.zhSrc !== 'llm') return false;                             // 已是精校/官方中文
+            if (hit.zhAt && now - hit.zhAt < UPGRADE_AFTER) return false;      // 译文还新鲜
+            if (hit.getavMiss && now - hit.getavMiss < UPGRADE_AFTER) return false; // 近期确认未收录
+            return true;                                                       // 旧机翻：尝试升级
+        });
+    }
 
     /* ---------------- Kimi 大模型翻译 ---------------- */
 
@@ -1071,8 +1094,8 @@
         setButtonState('translating');
         try {
             if (config.mode === 'llm') {
-                // 第 2 层：GetAV 精校中文（无需 Key，命中即显示）
-                const wantZh = [...new Set(cards.map((c) => c.slug))].filter((s) => !cache[s] || !cache[s].zh);
+                // 第 2 层：GetAV 精校中文（无需 Key，命中即显示；含旧机翻的来源升级重查）
+                const wantZh = needGetavQuery([...new Set(cards.map((c) => c.slug))]);
                 if (wantZh.length) await resolveViaGetav(wantZh);
                 // 第 3 层：剩余日文原标题走大模型（需要 Key）
                 if (config.apiKey) {
@@ -1265,8 +1288,9 @@
         const allSlugs = [...new Set(cards.map((c) => c.slug))];
         const needJa = allSlugs.filter((s) => !cache[s] || !cache[s].ja);
         // 重译模式：GetAV 精校中文是免费来源（无需 Key），只要有番号缺中文就有工作可做
+        // （含「来源升级」：超过 3 天的 llm 旧译文会重查 GetAV，命中以精校替换机翻）
         const llmWanted = config.mode === 'llm';
-        const needZh = llmWanted ? allSlugs.filter((s) => !cache[s] || !cache[s].zh) : [];
+        const needZh = llmWanted ? needGetavQuery(allSlugs) : [];
         if (!needJa.length && !needZh.length) return;
 
         running = true;
@@ -1426,7 +1450,8 @@
             '</div>' +
             '<div style="margin-top:6px;font-size:11px;color:#8b93a5">导出文件含明文 API Key，注意保管；可存入 iCloud 云盘跨浏览器导入</div>' +
             '<div style="display:flex;gap:8px;margin-top:8px">' +
-            '<button id="mve-diag" style="flex:1;padding:6px;border:1px solid #4c566a;border-radius:6px;background:transparent;color:#d7dee9;cursor:pointer">诊断（GetAV 链路）</button>' +
+            '<button id="mve-retry" style="flex:1;padding:6px;border:1px solid #4c566a;border-radius:6px;background:transparent;color:#d7dee9;cursor:pointer">重查未收录</button>' +
+            '<button id="mve-diag" style="flex:1;padding:6px;border:1px solid #4c566a;border-radius:6px;background:transparent;color:#d7dee9;cursor:pointer">诊断</button>' +
             '</div>' +
             '<pre id="mve-diag-out" style="display:none;margin-top:6px;padding:8px;border-radius:6px;background:#12151d;color:#9db8dd;font-size:11px;white-space:pre-wrap;word-break:break-all;max-height:180px;overflow:auto"></pre>' +
             '<div id="mve-msg" style="margin-top:8px;font-size:12px;color:#9db8dd;min-height:14px"></div>';
@@ -1486,6 +1511,21 @@
             importFile.value = ''; // 允许重复导入同一个文件
         });
         panel.querySelector('#mve-diag').addEventListener('click', runDiagnostics);
+        // 「重查未收录」：清掉 GetAV/Jable 的负缓存标记并立即重跑标题链。
+        // 适用场景：明知某站刚收录了新片（负缓存 24h 内），不想等自动过期
+        panel.querySelector('#mve-retry').addEventListener('click', () => {
+            let n = 0;
+            Object.keys(cache).forEach((k) => {
+                const c = cache[k];
+                if (!c) return;
+                if (c.getavMiss) { delete c.getavMiss; n++; }
+                if (c.jableMiss) { delete c.jableMiss; n++; }
+            });
+            saveCache(cache);
+            msg('已清除 ' + n + ' 条「未收录」标记，正在重新查询…');
+            togglePanel();
+            enhanceTitles();
+        });
     }
 
     /* ---------------- 环境诊断（面板一键自检，结果可复制反馈） ---------------- */
