@@ -1,5 +1,10 @@
 # Changelog
 
+## [4.0.10] - 2026-11-13
+
+- **新增 Jable 标题完整显示**：列表页卡片标题原为单行省略截断，现在放开换行全量展示（`h6.title` 去 nowrap/ellipsis）；列表容器是 flex-wrap 布局，同一排各列自动 stretch 等高，「标题全显示 + 每行高度一致」同时成立
+- **已知环境限制（记录）**：Jable 在 Cloudflare 后面，对不带浏览器 cookie 的请求返回 403 挑战页。桌面 Tampermonkey 的 GM_xhr 默认携带 cookie 可正常通过；部分移动脚本管理器（如 iOS 亚瑟）的 GM_xhr 不共享浏览器 cookie 罐，Jable 主动查询层会静默降级到大模型兜底（403 不写负缓存，不会误伤番号）。GetAV 无 CF，不受影响
+
 ## [4.0.9] - 2026-11-13
 
 - **新增 Jable 主动查询层**：中文标题链升级为「缓存 → GetAV 精校 → **Jable 官方繁中** → 大模型」——GetAV 未收录的新片按番号查询 Jable 视频页（服务端直出 h4 官方中文，HTTP 404 信号干净，zhSrc 优先级 2 仅次于 GetAV 精校）。MissAV 和 GetAV 两站流程都接入；Jable 本站不查自己。负缓存与防污染校验（标题必须含番号）与 GetAV 同规则

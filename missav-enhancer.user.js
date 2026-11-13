@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      4.0.9
-// @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、列表页标题放大、订阅页网格卡片（原 GetAV 脚本并入）
+// @version      4.0.10
+// @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、列表页标题放大、订阅页网格卡片（原 GetAV 脚本并入）；6) Jable 标题完整显示不省略（同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
 // @icon         https://missav.ws/favicon.ico
@@ -1947,6 +1947,24 @@
     }
 
     /* ================================================================
+     * 模块八 jable-ui：Jable 标题完整显示
+     * 列表页卡片标题 h6.title 用单行省略截断（white-space:nowrap +
+     * overflow:hidden + text-overflow:ellipsis），长标题只能看到一半。
+     * 容器 .row.gutter-20 是 flex-wrap 布局，同一行内各列默认 stretch
+     * 自动等高——所以只需放开换行，「每行高度一致」由 flex 天然保证。
+     * ================================================================ */
+
+    function initJableUi() {
+        if (document.getElementById('mve-jable-full-title')) return;
+        const style = document.createElement('style');
+        style.id = 'mve-jable-full-title';
+        style.textContent =
+            'h6.title{white-space:normal !important;overflow:visible !important;' +
+            'text-overflow:clip !important;overflow-wrap:break-word;}';
+        (document.head || document.documentElement).appendChild(style);
+    }
+
+    /* ================================================================
      * 启动与监听
      * 顺序：rescue → grid（片单页先改造 DOM）→ dedup → preview → titles。
      * DOM 变化共用一个 body 级 MutationObserver，回调里分发两个
@@ -1974,6 +1992,7 @@
             if (config.previewExclusive) initPreviewExclusive();
         }
         if (SITE === 'getav') initGetavUi();
+        if (SITE === 'jable') initJableUi();
         buildUI();
         if (config.titlesEnabled) {
             // 等去重和首屏渲染稳定后再处理标题
