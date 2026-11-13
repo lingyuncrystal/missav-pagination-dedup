@@ -1,5 +1,9 @@
 # Changelog
 
+## [4.0.4] - 2026-11-13
+
+- **修复中文字幕/无码专区 GetAV 全数未命中**：这些专区的详情页 URL 带 `-chinese-subtitle` / `-english-subtitle` / `-uncensored(-leak)` 后缀（如 `/en/ipzz-963-chinese-subtitle`），番号提取没剥后缀，拿 `ipzz-963-chinese-subtitle` 去查 GetAV 自然全部 404。现统一剥后缀还原标准番号——番号是跨站同一性主键，此修复同时消除缓存键污染，让字幕专区的跨站缓存复用生效
+
 ## [4.0.3] - 2026-11-13
 
 - **修复 GetAV 跨站查询卡死**：`@connect *` 通配写法下 Tampermonkey 会对每个陌生域名弹「跨源资源访问」授权窗，用户未处理时 GM_xhr 永远挂起（表现为「译…」转圈不动、无任何报错）。改为显式列出 getav.net 与四家大模型 API 域名（静默授权），保留 `@connect *` 兼容自定义服务商（此时仍会弹一次授权窗，属预期）

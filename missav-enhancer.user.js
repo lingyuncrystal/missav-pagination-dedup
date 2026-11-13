@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      4.0.3
+// @version      4.0.4
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、列表页标题放大、订阅页网格卡片（原 GetAV 脚本并入）
 // @author       Phaeton
 // @license      MIT
@@ -87,7 +87,12 @@
     function slugFromHref(href) {
         try {
             const seg = new URL(href, location.origin).pathname.split('/').filter(Boolean);
-            return (seg[seg.length - 1] || '').toLowerCase() || null;
+            const raw = (seg[seg.length - 1] || '').toLowerCase();
+            if (!raw) return null;
+            // MissAV 给带字幕/无码版本的详情页 URL 追加后缀（如 ipzz-963-chinese-subtitle）。
+            // 番号是跨站同一性主键（缓存键 + GetAV 查询参数），必须剥掉后缀还原成标准番号，
+            // 否则 GetAV 查询全部 404、缓存键被污染、跨站复用失效。
+            return raw.replace(/-(chinese-subtitle|english-subtitle|uncensored-leak|uncensored)$/i, '') || null;
         } catch {
             return null;
         }
