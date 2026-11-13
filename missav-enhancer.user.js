@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      3.3.0
+// @version      3.3.1
 // @description  四合一：1) 翻页去重——列表翻页时服务端常在页边界返回重复影片，自动隐藏；2) 标题修正——默认抓取日文原版标题替换机翻中文，可选填入 Kimi(Moonshot) API Key 升级为大模型重译（演员名保留日文读音自然音译）；3) 片单网格化——播放列表页改造为分类页同款缩略图网格卡片；4) 预览独占——手机端点卡片看预览时，自动暂停上一个预览视频，同时只播一个
 // @author       lingyuncrystal
 // @license      MIT
@@ -441,6 +441,10 @@
      */
     function fetchJaTitles(url, isDetail) {
         return new Promise((resolve, reject) => {
+            // 缓存破坏参数：站点反爬按「完整 URL」触发验证，带个无用参数常可绕过
+            // （与 rescue 模块同原理）；不影响标题解析
+            const u = new URL(url);
+            u.searchParams.set('_mve', Date.now().toString(36));
             const f = document.createElement('iframe');
             f.style.cssText =
                 'position:fixed;left:-9999px;top:0;width:800px;height:600px;' +
@@ -455,9 +459,10 @@
                 fn(val);
             };
             const timer = setTimeout(
-                () => finish(reject, new Error('日文页加载超时（Cloudflare 验证未完成）')),
+                () => finish(reject, new Error('日文页加载超时（Cloudflare 验证未完成，可刷新页面重试；多为网络/代理波动）')),
                 30000
             );
+            let noContentSince = 0; // 页面已加载但一直无卡片/标题：可能是 404 或空页
             const poll = setInterval(() => {
                 let doc;
                 try {
@@ -484,10 +489,17 @@
                     const own = slugFromHref(url);
                     const h1 = doc.querySelector('h1');
                     if (h1 && own && /\d/.test(own) && !map[own]) map[own] = h1.textContent.trim();
-                    if (Object.keys(map).length >= 3 || (own && map[own])) finish(resolve, map);
+                    if (Object.keys(map).length >= 3 || (own && map[own])) {
+                        finish(resolve, map);
+                        return;
+                    }
                 }
+                // 页面已就绪但连续约 6 秒取不到任何标题（如 /ja/playlists/* 这类
+                // 无对应日文页的 404）：按「无标题可取」静默收尾，不再干等到 30 秒超时
+                if (!noContentSince) noContentSince = Date.now();
+                else if (Date.now() - noContentSince > 6000) finish(resolve, {});
             }, 600);
-            f.src = url;
+            f.src = u.href;
             (document.body || document.documentElement).appendChild(f);
         });
     }
@@ -747,7 +759,13 @@
         try {
             if (needJa.length) {
                 const isDetail = !!document.querySelector('h1') && !document.querySelector('.thumbnail');
-                const jaMap = await fetchJaTitles(isDetail ? jaDetailUrl(needJa[0]) : jaListUrl(), isDetail);
+                const jaUrl = isDetail ? jaDetailUrl(needJa[0]) : jaListUrl();
+                // 首次失败多为网络/代理波动或 CF 偶发验证：等 3 秒自动重试一次再放弃
+                const jaMap = await fetchJaTitles(jaUrl, isDetail).catch(async (e) => {
+                    log('日文页首次抓取失败，3 秒后重试：' + e.message);
+                    await new Promise((r) => setTimeout(r, 3000));
+                    return fetchJaTitles(jaUrl, isDetail);
+                });
                 needJa.forEach((s) => {
                     if (jaMap[s]) cache[s] = Object.assign(cache[s] || {}, { ja: jaMap[s] });
                 });
