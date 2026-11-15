@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      4.0.15
-// @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、列表页标题放大、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
+// @version      4.0.16
+// @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
 // @icon         https://missav.ws/favicon.ico
@@ -1090,27 +1090,30 @@
         }
         const cards = processJableDom();
         if (!cards.length) return;
+        if (config.mode !== 'llm') return;
+        const slugs = [...new Set(cards.map((c) => c.slug))];
+        // 先算好有没有网络工作要做：全部命中缓存时直接早退——
+        // Observer 高频回调（我们自己改 DOM 也会触发）不能让按钮状态空闪
+        const wantZh = needGetavQuery(slugs);
+        const needLlm = () => config.apiKey
+            ? slugs.filter((s) => cache[s] && cache[s].ja && !cache[s].zh)
+            : [];
+        if (!wantZh.length && !needLlm().length) return;
         running = true;
         setButtonState('translating');
         try {
-            if (config.mode === 'llm') {
-                // 第 2 层：GetAV 精校中文（无需 Key，命中即显示；含旧机翻的来源升级重查）
-                const wantZh = needGetavQuery([...new Set(cards.map((c) => c.slug))]);
-                if (wantZh.length) await resolveViaGetav(wantZh);
-                // 第 3 层：剩余日文原标题走大模型（需要 Key）
-                if (config.apiKey) {
-                    const todo = [...new Set(cards.map((c) => c.slug))]
-                        .filter((s) => cache[s] && cache[s].ja && !cache[s].zh);
-                    for (let i = 0; i < todo.length; i += 20) {
-                        const chunk = todo.slice(i, i + 20);
-                        const zhArr = await translateBatch(chunk.map((s) => cache[s].ja));
-                        chunk.forEach((s, j) => {
-                            setZh(s, zhArr[j], 'llm');
-                        });
-                        saveCache(cache);
-                        applyCached(collectJableCards());
-                    }
-                }
+            // 第 2 层：GetAV 精校中文（无需 Key，命中即显示；含旧机翻的来源升级重查）
+            if (wantZh.length) await resolveViaGetav(wantZh);
+            // 第 3 层：剩余日文原标题走大模型（需要 Key；GetAV 命中的已被 needLlm 重算排除）
+            const todo = needLlm();
+            for (let i = 0; i < todo.length; i += 20) {
+                const chunk = todo.slice(i, i + 20);
+                const zhArr = await translateBatch(chunk.map((s) => cache[s].ja));
+                chunk.forEach((s, j) => {
+                    setZh(s, zhArr[j], 'llm');
+                });
+                saveCache(cache);
+                applyCached(collectJableCards());
             }
             lastError = null;
             setButtonState('done');
@@ -1199,24 +1202,27 @@
         const cards = processGetavDom();
         if (!cards.length) return;
         if (config.mode !== 'llm') return;
+        const slugs = [...new Set(cards.map((c) => c.slug))];
+        // 同样先算工作量再启动：Observer 高频回调不能让按钮状态空闪
+        const wantZh = slugs.filter((s) => !cache[s] || !cache[s].zh);
+        const needLlm = () => config.apiKey
+            ? slugs.filter((s) => cache[s] && cache[s].ja && !cache[s].zh)
+            : [];
+        if (!wantZh.length && !needLlm().length) return;
         running = true;
         setButtonState('translating');
         try {
             // GetAV 上的日文原标题：先查 Jable 官方中文（无需 Key），再轮到大模型
-            const wantZh = [...new Set(cards.map((c) => c.slug))].filter((s) => !cache[s] || !cache[s].zh);
             if (wantZh.length) await resolveViaJable(wantZh);
-            if (config.apiKey) {
-                const todo = [...new Set(cards.map((c) => c.slug))]
-                    .filter((s) => cache[s] && cache[s].ja && !cache[s].zh);
-                for (let i = 0; i < todo.length; i += 20) {
-                    const chunk = todo.slice(i, i + 20);
-                    const zhArr = await translateBatch(chunk.map((s) => cache[s].ja));
-                    chunk.forEach((s, j) => {
-                        setZh(s, zhArr[j], 'llm');
-                    });
-                    saveCache(cache);
-                    applyCached(collectGetavCards());
-                }
+            const todo = needLlm();
+            for (let i = 0; i < todo.length; i += 20) {
+                const chunk = todo.slice(i, i + 20);
+                const zhArr = await translateBatch(chunk.map((s) => cache[s].ja));
+                chunk.forEach((s, j) => {
+                    setZh(s, zhArr[j], 'llm');
+                });
+                saveCache(cache);
+                applyCached(collectGetavCards());
             }
             lastError = null;
             setButtonState('done');
@@ -1684,15 +1690,12 @@
 
     /* ================================================================
      * 模块七 getav-ui：GetAV 界面增强（原 getav-full-titles 脚本并入）
-     * 四个功能：解除标题截断、title 属性补全、列表页标题放大一号、
-     * 订阅页三列网格卡片。与主流程共用 document-idle 启动，
+     * 三个功能：解除标题截断、title 属性补全、订阅页三列网格卡片。
+     * 与主流程共用 document-idle 启动，
      * 首次渲染可能有极短暂的截断闪现，Observer 会立即修正。
      * ================================================================ */
 
     const isGetavSubscriptionsPage = SITE === 'getav' && /\/profile\/subscriptions/.test(location.pathname);
-    const GETAV_ENLARGE_FACTOR = 1.12; // 列表页标题放大倍率（实测约大一号，再大卡片会拥挤）
-    const GETAV_MIN_FONT = 11;  // 只放大正文级标题：跳过更小的辅助文字
-    const GETAV_MAX_FONT = 20;  // 跳过页面大标题
 
     /** querySelectorAll 的补充：动态加载时新增节点本身可能也匹配选择器，需把 root 自身纳入 */
     function queryAllWithSelf(root, selector) {
@@ -1977,29 +1980,6 @@
         }
     }
 
-    /** 列表页标题字号大一号 */
-    const getavEnlargedTitles = new WeakSet();
-    function enlargeGetavListTitles(root) {
-        // 订阅页有专门的名字样式，视频详情页（/videos/番号）不在此列，其余（首页/分类/搜索等）都算列表页
-        if (isGetavSubscriptionsPage) return;
-        if (/\/videos\//i.test(location.pathname)) return;
-        const els = queryAllWithSelf(
-            root,
-            'a[title], h1, h2, h3, h4, .title, .video-title, [class*="title"], [class*="Title"]'
-        );
-        for (const el of els) {
-            if (getavEnlargedTitles.has(el)) continue;
-            if (el.closest('#getav-sub-grid')) continue;
-            const size = parseFloat(getComputedStyle(el).fontSize);
-            // 只对正文级别的标题放大；确认放大后才标记进 WeakSet（否则站点 CSS
-            // 未加载完时字号暂时不在区间的元素会被永久跳过——已踩过的时序坑）
-            if (size >= GETAV_MIN_FONT && size <= GETAV_MAX_FONT) {
-                el.style.setProperty('font-size', Math.round(size * GETAV_ENLARGE_FACTOR) + 'px', 'important');
-                getavEnlargedTitles.add(el);
-            }
-        }
-    }
-
     /** GetAV 界面增强入口（自带独立 Observer：增量扫描新增节点） */
     function initGetavUi() {
         injectGetavStyles();
@@ -2014,14 +1994,12 @@
                 for (const root of targets) {
                     fillGetavFromTitle(root);
                     expandGetavTruncated(root);
-                    enlargeGetavListTitles(root);
                 }
                 makeGetavThreeColumns();
             }, 300);
         };
         fillGetavFromTitle(document);
         expandGetavTruncated(document);
-        enlargeGetavListTitles(document);
         makeGetavThreeColumns();
         new MutationObserver((muts) => {
             let hasAdded = false;
@@ -2081,10 +2059,10 @@
     }, 200);
     const debouncedReapplyTitles = debounce(() => {
         if (!config.titlesEnabled) return;
-        // Jable：新渲染的卡片（含轮播克隆）需要补徽章、记录原文并回写译文
-        if (SITE === 'jable') processJableDom();
-        else if (SITE === 'getav') processGetavDom();
-        else applyCached(collectCards());
+        // 动态新增的内容（Jable AJAX 翻页、无限滚动、MissAV Plus 重渲染等）
+        // 直接重走完整标题链：各站流程内部都有「无网络工作即早退」，
+        // 全部命中缓存的页面不会发出任何请求，按钮状态也不空闪
+        enhanceTitles();
     }, 400);
 
     function init() {
