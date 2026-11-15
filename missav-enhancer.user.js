@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      4.0.17
+// @version      4.0.18
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -2069,18 +2069,49 @@
      * 单模块容错执行：任何一个模块初始化失败都只记日志、跳过，
      * 绝不允许拖垮整个 init（真实教训：GetAV 的 UI 增强若在手机
      * 浏览器上因 DOM 差异抛错，排在它后面的设置按钮就建不出来）。
+     * 失败记录进 initErrors，供兜底按钮展示（手机端看不到 console）。
      */
+    const initErrors = [];
     function safe(name, fn) {
         try {
             fn();
         } catch (e) {
+            const m = String((e && e.message) || e);
+            initErrors.push(name + '：' + m);
             log('模块 ' + name + ' 初始化失败（已跳过，不影响其他功能）：', e);
         }
     }
 
+    /** 兜底入口：正常面板构建失败时放一个极简按钮，点击弹出失败原因（手机端排查用） */
+    function buildFallbackButton() {
+        try {
+            const b = document.createElement('button');
+            b.textContent = '译!';
+            b.style.cssText =
+                'position:fixed;right:16px;bottom:76px;z-index:2147483647;width:40px;height:40px;' +
+                'border-radius:50%;border:1px solid #ef4444;background:#1f2430;color:#ef4444;font-size:14px;';
+            b.addEventListener('click', () => {
+                const ver = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '?';
+                alert('设置面板构建失败（v' + ver + '），请截图反馈：\n\n' +
+                    (initErrors.length ? initErrors.join('\n') : '未捕获到具体错误') +
+                    '\n\n站点：' + SITE + '\nbody：' + (document.body ? '存在' : '不存在'));
+            });
+            (document.body || document.documentElement).appendChild(b);
+        } catch (e) { /* 连兜底都失败就只能放弃 */ }
+    }
+
     function init() {
+        // 极端环境兜底：部分手机浏览器在 document-idle 时 body 尚未就绪，
+        // appendChild 会抛错——等 body 出现再初始化（最多约 10 秒）
+        if (!document.body) {
+            waitFor(() => !!document.body, { interval: 200, tries: 50 }).then((ok) => {
+                if (ok) init();
+            });
+            return;
+        }
         // 设置入口最先建：后续任何模块失败都不丢用户入口
         safe('settings-ui', buildUI);
+        if (!btn) buildFallbackButton(); // 面板没建出来 → 放兜底按钮报告原因
         // rescue / grid / dedup / preview 是 MissAV 专属（Jable/GetAV 无对应页面结构；
         // Jable 的预览行为未做适配测试，预览独占暂不开启）
         if (SITE === 'missav') {
