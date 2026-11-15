@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      4.0.16
+// @version      4.0.17
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -2065,28 +2065,44 @@
         enhanceTitles();
     }, 400);
 
+    /**
+     * 单模块容错执行：任何一个模块初始化失败都只记日志、跳过，
+     * 绝不允许拖垮整个 init（真实教训：GetAV 的 UI 增强若在手机
+     * 浏览器上因 DOM 差异抛错，排在它后面的设置按钮就建不出来）。
+     */
+    function safe(name, fn) {
+        try {
+            fn();
+        } catch (e) {
+            log('模块 ' + name + ' 初始化失败（已跳过，不影响其他功能）：', e);
+        }
+    }
+
     function init() {
+        // 设置入口最先建：后续任何模块失败都不丢用户入口
+        safe('settings-ui', buildUI);
         // rescue / grid / dedup / preview 是 MissAV 专属（Jable/GetAV 无对应页面结构；
         // Jable 的预览行为未做适配测试，预览独占暂不开启）
         if (SITE === 'missav') {
-            rescueChallengePage();
-            if (isPlaylistPage && config.gridEnabled) waitFor(applyGridLayout);
-            if (config.dedupEnabled) waitFor(dedup);
-            if (config.previewExclusive) initPreviewExclusive();
+            safe('rescue', rescueChallengePage);
+            if (isPlaylistPage && config.gridEnabled) safe('grid', () => waitFor(applyGridLayout));
+            if (config.dedupEnabled) safe('dedup', () => waitFor(dedup));
+            if (config.previewExclusive) safe('preview', initPreviewExclusive);
+            safe('missav-ui', initMissavUi);
         }
-        if (SITE === 'getav') initGetavUi();
-        if (SITE === 'jable') initJableUi();
-        if (SITE === 'missav') initMissavUi();
-        buildUI();
+        if (SITE === 'getav') safe('getav-ui', initGetavUi);
+        if (SITE === 'jable') safe('jable-ui', initJableUi);
         if (config.titlesEnabled) {
             // 等去重和首屏渲染稳定后再处理标题
-            setTimeout(enhanceTitles, 800);
+            setTimeout(() => safe('titles', enhanceTitles), 800);
         }
         // 兼容动态加载与 MissAV Plus 的标题重渲染 / 筛选条注入
-        new MutationObserver(() => {
-            debouncedRelocate();
-            debouncedReapplyTitles();
-        }).observe(document.body, { childList: true, subtree: true });
+        safe('observer', () => {
+            new MutationObserver(() => {
+                debouncedRelocate();
+                debouncedReapplyTitles();
+            }).observe(document.body, { childList: true, subtree: true });
+        });
         if (typeof GM_registerMenuCommand === 'function') {
             const menuLabel = { jable: 'Jable 标题增强设置', getav: 'GetAV 增强设置' }[SITE] || 'MissAV 综合增强设置';
             GM_registerMenuCommand(menuLabel, togglePanel);
