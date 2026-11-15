@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      4.0.14
+// @version      4.0.15
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、列表页标题放大、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -1290,8 +1290,12 @@
         // 重译模式：GetAV 精校中文是免费来源（无需 Key），只要有番号缺中文就有工作可做
         // （含「来源升级」：超过 3 天的 llm 旧译文会重查 GetAV，命中以精校替换机翻）
         const llmWanted = config.mode === 'llm';
+        // 日文抓取（iframe + CF 验证，成本高）只在两种情况下有意义：
+        // ja 模式要显示日文原标题；llm 模式【且已填 Key】才有人翻译。
+        // 无 Key 的 llm 模式抓到日文也无人翻译，跳过抓取，只跑免费中文源
+        const jaWanted = !llmWanted || !!config.apiKey;
         const needZh = llmWanted ? needGetavQuery(allSlugs) : [];
-        if (!needJa.length && !needZh.length) return;
+        if ((!needJa.length || !jaWanted) && !needZh.length) return;
 
         running = true;
         setButtonState('translating');
@@ -1320,7 +1324,7 @@
             // GetAV/Jable 命中的番号已有可靠中文，重译模式下连日文原文都不再需要——
             // 日文抓取和大模型只为「两个中文源都没收录」的番号兜底
             const needJa2 = llmWanted ? needJa.filter((s) => !cache[s] || !cache[s].zh) : needJa;
-            if (needJa2.length) {
+            if (needJa2.length && jaWanted) {
                 const isDetail = !!document.querySelector('h1') && !document.querySelector('.thumbnail');
                 const jaUrl = isDetail ? jaDetailUrl(needJa2[0]) : jaListUrl();
                 // 首次失败多为网络/代理波动或 CF 偶发验证：等 3 秒自动重试一次再放弃
