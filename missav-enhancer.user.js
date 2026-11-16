@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      4.0.18
+// @version      4.0.21
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -84,6 +84,49 @@
         };
     }
 
+    /**
+     * 安全改写元素文本：优先改「文本节点的值」，不替换节点本身。
+     * GetAV 已迁到 React（Next.js），React 的 fiber 持有服务端生成的文本节点引用；
+     * 一旦我们按老办法 `el.textContent = ...` 整块换掉，React 之后卸载该节点时
+     * removeChild 一个已脱离文档的旧节点会抛 NotFoundError，直接搞崩页面。
+     * 改 nodeValue 则引用不变，React 自己重渲染时也能正常覆盖。
+     * 附带好处：characterData 变动不触发 childList 型 MutationObserver，不会自我回环。
+     * 结构复杂（含元素子节点）时退回整块替换，并计数供诊断面板上报。
+     */
+    const textWrites = { node: 0, block: 0, samples: [] };
+
+    function setTextSafe(el, text) {
+        if (!el) return false;
+        const kids = el.childNodes;
+        if (kids.length === 1 && kids[0].nodeType === Node.TEXT_NODE) {
+            if (kids[0].nodeValue !== text) kids[0].nodeValue = text;
+            textWrites.node++;
+            return true;
+        }
+        if (!el.children.length) {
+            // 纯文本多节点：只改第一个、其余置空——删节点会破坏 React 的引用
+            let first = true;
+            for (const n of kids) {
+                if (n.nodeType !== Node.TEXT_NODE) continue;
+                n.nodeValue = first ? text : '';
+                first = false;
+            }
+            if (!first) {
+                textWrites.node++;
+                return true;
+            }
+        }
+        el.textContent = text;
+        textWrites.block++;
+        // 记录前 3 个「整块替换」节点，诊断面板展示——这类节点结构复杂，
+        // 是 React 站点上唯一还可能引发卸载异常的写入口，便于远程定位
+        if (textWrites.samples.length < 3) {
+            const cls = (el.getAttribute && el.getAttribute('class')) || '';
+            textWrites.samples.push(el.tagName.toLowerCase() + (cls ? '.' + cls.split(/\s+/)[0] : ''));
+        }
+        return false;
+    }
+
     /** 从链接（或当前 URL）提取番号 slug：路径末段小写，如 madv-646 */
     function slugFromHref(href) {
         try {
@@ -164,7 +207,7 @@
             //    只用 class 不加内联样式：装了 MissAV Plus 的用户由其
             //    「完整标题」等设置接管显示效果，未装则为单行截断。
             //    该结构同时被 titles 模块的 collectCards 识别，
-            //    因此片单页标题也能自动获得日文原标题 / 大模型重译。
+            //    因此片单页标题也能自动获得统一的中文标题（缓存/GetAV/Jable/大模型）。
             if (thumbnail && label) {
                 const href = (thumbnail.querySelector('a[href]') || {}).href || '#';
                 const titleDiv = document.createElement('div');
@@ -367,7 +410,7 @@
     }
 
     /* ================================================================
-     * 模块五 titles：标题修正（日文原标题 / 大模型重译）
+     * 模块五 titles：标题修正（中文标题链：缓存 → GetAV → Jable → 大模型）
      * 大模型服务商预设见 PROVIDERS：选中即自动填好地址与默认模型，
      * 用户只需粘贴 Key；「自定义」保留手填入口（OpenAI 兼容接口）。
      * Jable 走独立流程：中文原标题封面加「字幕」徽章，日文原标题
@@ -393,7 +436,6 @@
         baseUrl: 'https://api.moonshot.cn/v1',
         apiKey: '',
         model: 'kimi-k2.6',
-        mode: 'llm', // 'ja' = 日文原标题（不翻译）；'llm' = 中文标题链（缓存 → GetAV 精校 → 大模型兜底，无 Key 也能用 GetAV 精校）
         showButton: true, // 右下角浮动「译」按钮
         titlesEnabled: true,
         dedupEnabled: true, // 翻页去重总开关（保存后刷新页面生效）
@@ -462,6 +504,11 @@
     const normUrl = (u) => String(u || '').replace(/\/+$/, '');
     const matchedPreset = PROVIDERS.find((p) => p.id !== 'custom' && normUrl(p.baseUrl) === normUrl(config.baseUrl));
     config.provider = matchedPreset ? matchedPreset.id : 'custom';
+    // 4.0.20 起取消「日文原标题」选项：标题统一走中文链，清掉旧配置里的 mode 字段
+    if ('mode' in config) {
+        delete config.mode;
+        saveConfig(config);
+    }
     // 已停用/下线模型名自动迁移（官方公告日期见 PROVIDERS 注释）。
     // 按服务商限定：自定义网关用户恰好用同名模型时不受打扰
     const MODEL_MIGRATIONS = {
@@ -1011,6 +1058,24 @@
         return 'other';
     }
 
+    /**
+     * 兜底收集：站点改版或首页用了不同卡片结构时，主选择器可能一张都匹配不到。
+     * 用「链接文本里含番号本身」这条强特征定位标题链接（番号是跨站同一性主键），
+     * 再用文本长度排除整块容器。只在主选择器为空时调用，不影响正常页面。
+     */
+    function collectAnchorsBySlug(selector, maxTextLen) {
+        const out = [];
+        document.querySelectorAll(selector).forEach((a) => {
+            const slug = slugFromHref(a.href);
+            if (!slug || !/\d/.test(slug)) return;
+            const txt = a.textContent.trim();
+            if (!txt || txt.length > maxTextLen) return;
+            if (!txt.toUpperCase().includes(slug.toUpperCase())) return;
+            out.push({ slug, anchor: a, hidden: false });
+        });
+        return out;
+    }
+
     /** Jable 卡片：h6.title 里的番号链接 + 同卡 .video-img-box 封面容器 */
     function collectJableCards() {
         const out = [];
@@ -1019,6 +1084,13 @@
             if (!slug) return;
             out.push({ slug, anchor, box: anchor.closest('.video-img-box'), hidden: false });
         });
+        // 首页/改版兜底：找带番号文本的视频链接，补上封面容器（有则加字幕徽章）
+        if (!out.length) {
+            collectAnchorsBySlug('a[href*="/videos/"]', 200).forEach((c) => {
+                c.box = c.anchor.closest('.video-img-box');
+                out.push(c);
+            });
+        }
         return out;
     }
 
@@ -1069,7 +1141,7 @@
             const lang = classifyTitle(orig);
             if (lang === 'cn') {
                 ensureSubBadge(box);
-                // 只写 zh 不碰 ja——避免「日文原标题」模式错显中文；
+                // 只写 zh 不碰 ja——ja 保留站点原文供翻译/语言判定；
                 // setZh 按优先级写入，不会覆盖已有的 GetAV 精校中文
                 if (setZh(slug, orig, 'jable')) changed = true;
             } else if (lang === 'ja') {
@@ -1090,7 +1162,6 @@
         }
         const cards = processJableDom();
         if (!cards.length) return;
-        if (config.mode !== 'llm') return;
         const slugs = [...new Set(cards.map((c) => c.slug))];
         // 先算好有没有网络工作要做：全部命中缓存时直接早退——
         // Observer 高频回调（我们自己改 DOM 也会触发）不能让按钮状态空闪
@@ -1157,7 +1228,14 @@
             if (!slug) return;
             const text = (anchor.getAttribute('title') || anchor.textContent).trim();
             if (!text.toUpperCase().includes(slug.toUpperCase())) return;
-            out.push({ slug, anchor, hidden: false });
+            // 2026-11 新版 GetAV（Next.js 改版）：指向视频的 <a> 包着「标题 + 播放量/演员」
+            // 整块信息，标题实际在内层 h3。若直接把 textContent 写进 <a>，会把统计信息
+            // 一起抹掉、缓存里也会混入播放量等杂质。只在标题元素文本确实含番号时才改目标，
+            // 旧版结构（<a> 本身就是标题链接）自动走回退分支。
+            const titleEl = anchor.querySelector('h1, h2, h3, h4');
+            const target = titleEl && titleEl.textContent.toUpperCase().includes(slug.toUpperCase())
+                ? titleEl : anchor;
+            out.push({ slug, anchor: target, hidden: false });
         });
         // 详情页 h1（同样带番号）
         const h1 = document.querySelector('h1');
@@ -1201,7 +1279,6 @@
         }
         const cards = processGetavDom();
         if (!cards.length) return;
-        if (config.mode !== 'llm') return;
         const slugs = [...new Set(cards.map((c) => c.slug))];
         // 同样先算工作量再启动：Observer 高频回调不能让按钮状态空闪
         const wantZh = slugs.filter((s) => !cache[s] || !cache[s].zh);
@@ -1245,8 +1322,13 @@
         if (SITE === 'getav') return collectGetavCards();
         const out = [];
         document.querySelectorAll('.thumbnail').forEach((thumb) => {
-            const anchor = thumb.parentElement.querySelector('.my-2 a[href], a.mv-full-title[href]') ||
-                thumb.querySelector('.my-2 a[href], a.mv-full-title[href]');
+            // 标题链接优先在卡片内部找：首页（推荐/新着等网格）把 .my-2 标题放在
+            // .thumbnail 里、而 .thumbnail 直接挂在 grid 下，若先查 parentElement，
+            // 每张卡都会拿到整个网格里第一张卡的标题链接——所有卡片指向同一个番号，
+            // 结果只有第一张卡的标题被替换（「首页标题不生效」的根因）。
+            // 列表页标题若在卡片外层（每个卡片有独立包裹 div），内部查不到时再回退父级。
+            const anchor = thumb.querySelector('.my-2 a[href], a.mv-full-title[href]') ||
+                thumb.parentElement.querySelector('.my-2 a[href], a.mv-full-title[href]');
             if (!anchor) return;
             const slug = slugFromHref(anchor.href);
             if (!slug) return;
@@ -1254,6 +1336,8 @@
             const hidden = card && getComputedStyle(card).display === 'none';
             out.push({ slug, anchor, hidden });
         });
+        // 首页/改版兜底：整页没有任何 .thumbnail 时，按「链接文本含番号」识别标题链接
+        if (!out.length) out.push(...collectAnchorsBySlug('a[href]', 160));
         // 详情页主标题 h1（路径末段含数字视为番号页，排除 release 等列表页）
         const h1 = document.querySelector('h1');
         const pageSlug = slugFromHref(location.href);
@@ -1263,22 +1347,23 @@
         return out;
     }
 
-    /** 缓存命中即回写：llm 模式显示中文译文，ja 模式显示日文原标题 */
+    /** 缓存命中即回写中文译文；没有中文来源的番号保持原标题 */
     function applyCached(cards) {
         let applied = 0;
         cards.forEach(({ slug, anchor, hidden }) => {
             if (hidden) return; // 去重隐藏的卡片不写
             const hit = cache[slug];
-            const want = hit && (config.mode === 'llm' && hit.zh ? hit.zh : hit.ja);
+            // 只写中文：没有中文来源的番号保持原标题（不再有「日文原标题」模式）
+            const want = hit && hit.zh;
             if (want && anchor.textContent.trim() !== want) {
-                anchor.textContent = want;
+                setTextSafe(anchor, want);
                 applied++;
             }
         });
         return applied;
     }
 
-    /** 主流程：先取日文标题（每页一次请求），再按模式决定是否调大模型 */
+    /** 主流程：先取中文（GetAV / Jable），未收录的再抓日文交给大模型兜底 */
     async function enhanceTitles() {
         if (!config.titlesEnabled) return;
         if (SITE === 'jable') return enhanceJableTitles();
@@ -1293,21 +1378,19 @@
         applyCached(cards);
         const allSlugs = [...new Set(cards.map((c) => c.slug))];
         const needJa = allSlugs.filter((s) => !cache[s] || !cache[s].ja);
-        // 重译模式：GetAV 精校中文是免费来源（无需 Key），只要有番号缺中文就有工作可做
+        // 中文标题链：GetAV 精校中文免费、无需 Key，缺中文的番号就是有工作可做
         // （含「来源升级」：超过 3 天的 llm 旧译文会重查 GetAV，命中以精校替换机翻）
-        const llmWanted = config.mode === 'llm';
-        // 日文抓取（iframe + CF 验证，成本高）只在两种情况下有意义：
-        // ja 模式要显示日文原标题；llm 模式【且已填 Key】才有人翻译。
-        // 无 Key 的 llm 模式抓到日文也无人翻译，跳过抓取，只跑免费中文源
-        const jaWanted = !llmWanted || !!config.apiKey;
-        const needZh = llmWanted ? needGetavQuery(allSlugs) : [];
+        const needZh = needGetavQuery(allSlugs);
+        // 日文抓取（iframe + CF 验证，成本高）只服务大模型翻译：没填 Key 抓到也没人翻，
+        // 直接跳过，只跑免费中文源
+        const jaWanted = !!config.apiKey;
         if ((!needJa.length || !jaWanted) && !needZh.length) return;
 
         running = true;
         setButtonState('translating');
         // 把当前可翻的（已有日文、缺中文）送去大模型；返回是否还有剩余
         const translateTodo = async () => {
-            if (config.mode !== 'llm' || !config.apiKey) return;
+            if (!config.apiKey) return;
             const todo = [...new Set(collectCards().filter((c) => !c.hidden).map((c) => c.slug))]
                 .filter((s) => cache[s] && cache[s].ja && !cache[s].zh);
             for (let i = 0; i < todo.length; i += 20) {
@@ -1322,14 +1405,14 @@
             }
         };
         try {
-            // 第 2 层：GetAV 精校中文源（重译模式；无需 Key；命中即缓存并显示）
-            if (llmWanted && needZh.length) await resolveViaGetav(needZh);
+            // 第 2 层：GetAV 精校中文源（免费；无需 Key；命中即缓存并显示）
+            if (needZh.length) await resolveViaGetav(needZh);
             // 第 2.5 层：Jable 官方中文源——GetAV 未收录的新片常能在 Jable 找到官方繁中
-            const stillNeedZh = llmWanted ? needZh.filter((s) => !cache[s] || !cache[s].zh) : [];
+            const stillNeedZh = needZh.filter((s) => !cache[s] || !cache[s].zh);
             if (stillNeedZh.length) await resolveViaJable(stillNeedZh);
-            // GetAV/Jable 命中的番号已有可靠中文，重译模式下连日文原文都不再需要——
+            // GetAV/Jable 命中的番号已有可靠中文，连日文原文都不再需要——
             // 日文抓取和大模型只为「两个中文源都没收录」的番号兜底
-            const needJa2 = llmWanted ? needJa.filter((s) => !cache[s] || !cache[s].zh) : needJa;
+            const needJa2 = needJa.filter((s) => !cache[s] || !cache[s].zh);
             if (needJa2.length && jaWanted) {
                 const isDetail = !!document.querySelector('h1') && !document.querySelector('.thumbnail');
                 const jaUrl = isDetail ? jaDetailUrl(needJa2[0]) : jaListUrl();
@@ -1427,43 +1510,65 @@
             'padding:14px;border-radius:10px;' +
             'background:#1f2430;border:1px solid #3b7cd7;color:#d7dee9;font-size:13px;display:none;' +
             'box-shadow:0 4px 20px rgba(0,0,0,.6);';
+        // 面板分四组折叠（<details>）：默认只展开「大模型与 Key」，
+        // 其余按需展开——元素多，手机上一口气铺开会超屏
+        const secStyle = 'cursor:pointer;padding:7px 0;font-weight:600;color:#cbd5e1;';
+        const boxStyle = 'padding:2px 0 4px';
+        const inputStyle = 'width:100%;margin-top:2px;padding:5px;border-radius:6px;border:1px solid #4c566a;background:#2e3440;color:#eceff4';
+        const ghostBtn = 'padding:6px;border:1px solid #4c566a;border-radius:6px;background:transparent;color:#d7dee9;cursor:pointer;font-size:12px';
         panel.innerHTML =
-            '<div style="font-weight:600;margin-bottom:10px">' + ({ jable: 'Jable 标题增强设置', getav: 'GetAV 增强设置' }[SITE] || 'MissAV 综合增强设置') + '</div>' +
-            '<div style="margin-bottom:8px">' +
-            '<label style="display:flex;align-items:center;gap:6px;margin-bottom:4px"><input type="radio" name="mve-mode" id="mve-mode-ja" value="ja"> 日文原标题（不翻译）</label>' +
-            '<label style="display:flex;align-items:center;gap:6px"><input type="radio" name="mve-mode" id="mve-mode-llm" value="llm"> 中文标题（缓存 → GetAV / Jable → 大模型兜底）</label>' +
-            '<div style="margin:2px 0 0 22px;font-size:11px;color:#8b93a5">无需 Key：GetAV 精校 / Jable 官方中文直接显示；填 Key 后都未收录的再走大模型</div>' +
-            '</div>' +
-            '<label style="display:block;margin-bottom:2px">大模型服务<br><select id="mve-provider" style="width:100%;margin-top:2px;padding:5px;border-radius:6px;border:1px solid #4c566a;background:#2e3440;color:#eceff4">' +
+            '<div style="font-weight:600;margin-bottom:8px">' + ({ jable: 'Jable 标题增强设置', getav: 'GetAV 增强设置' }[SITE] || 'MissAV 综合增强设置') + '</div>' +
+            '<button id="mve-save" style="width:100%;padding:6px;border:none;border-radius:6px;background:#3b7cd7;color:#fff;cursor:pointer">保存并应用</button>' +
+            '<div style="margin:6px 0 2px;font-size:11px;color:#8b93a5">中文标题：缓存 → GetAV 精校 → Jable 繁中 → 大模型兜底（前两级无需 Key）</div>' +
+            '<details open style="border-top:1px solid #2e3440;margin-top:4px">' +
+            '<summary style="' + secStyle + '">大模型与 Key</summary>' +
+            '<div style="' + boxStyle + '">' +
+            '<label style="display:block;margin-bottom:2px">大模型服务<br><select id="mve-provider" style="' + inputStyle + '">' +
             PROVIDERS.map((p) => '<option value="' + p.id + '">' + p.name + '</option>').join('') +
             '</select></label>' +
             '<div id="mve-key-hint" style="margin:0 0 6px;font-size:11px;color:#8b93a5"></div>' +
-            '<label style="display:block;margin-bottom:6px">API Key<br><input id="mve-key" type="password" placeholder="sk-..." style="width:100%;margin-top:2px;padding:5px;border-radius:6px;border:1px solid #4c566a;background:#2e3440;color:#eceff4"></label>' +
+            '<label style="display:block;margin-bottom:6px">API Key<br><input id="mve-key" type="password" placeholder="sk-..." style="' + inputStyle + '"></label>' +
             // 选「自定义」才展开的手填区；预设服务商的地址/模型由 PROVIDERS 提供
             '<div id="mve-custom-fields" style="display:none">' +
-            '<label style="display:block;margin-bottom:6px">API 地址<br><input id="mve-base" style="width:100%;margin-top:2px;padding:5px;border-radius:6px;border:1px solid #4c566a;background:#2e3440;color:#eceff4"></label>' +
-            '<label style="display:block;margin-bottom:6px">模型<br><input id="mve-model" style="width:100%;margin-top:2px;padding:5px;border-radius:6px;border:1px solid #4c566a;background:#2e3440;color:#eceff4"></label>' +
+            '<label style="display:block;margin-bottom:6px">API 地址<br><input id="mve-base" style="' + inputStyle + '"></label>' +
+            '<label style="display:block;margin-bottom:6px">模型<br><input id="mve-model" style="' + inputStyle + '"></label>' +
             '</div>' +
-            '<label style="display:flex;align-items:center;gap:6px;margin:8px 0"><input id="mve-enabled" type="checkbox"> 启用标题修正</label>' +
-            '<label style="display:flex;align-items:center;gap:6px;margin:8px 0"><input id="mve-dedup" type="checkbox"> 启用翻页去重（改动后刷新页面生效）</label>' +
-            '<label style="display:flex;align-items:center;gap:6px;margin:8px 0"><input id="mve-grid" type="checkbox"> 启用片单网格化（改动后刷新页面生效）</label>' +
-            '<label style="display:flex;align-items:center;gap:6px;margin:8px 0"><input id="mve-preview" type="checkbox"> 预览独占：同时只播放一个预览视频（改动后刷新页面生效）</label>' +
-            '<label style="display:flex;align-items:center;gap:6px;margin:8px 0"><input id="mve-showbtn" type="checkbox"> 显示右下角「译」按钮（隐藏后可用脚本菜单打开本设置）</label>' +
-            '<div style="display:flex;gap:8px;margin-top:8px">' +
-            '<button id="mve-save" style="flex:1;padding:6px;border:none;border-radius:6px;background:#3b7cd7;color:#fff;cursor:pointer">保存并应用</button>' +
-            '<button id="mve-clear" style="padding:6px 10px;border:1px solid #4c566a;border-radius:6px;background:transparent;color:#d7dee9;cursor:pointer">清缓存</button>' +
             '</div>' +
-            '<div style="display:flex;gap:8px;margin-top:8px">' +
-            '<button id="mve-export" style="flex:1;padding:6px;border:1px solid #4c566a;border-radius:6px;background:transparent;color:#d7dee9;cursor:pointer">导出配置+缓存</button>' +
-            '<button id="mve-import" style="flex:1;padding:6px;border:1px solid #4c566a;border-radius:6px;background:transparent;color:#d7dee9;cursor:pointer">导入</button>' +
+            '</details>' +
+            '<details style="border-top:1px solid #2e3440">' +
+            '<summary style="' + secStyle + '">功能开关</summary>' +
+            '<div style="' + boxStyle + '">' +
+            '<label style="display:flex;align-items:center;gap:6px;margin:6px 0"><input id="mve-enabled" type="checkbox"> 启用标题修正</label>' +
+            '<label style="display:flex;align-items:center;gap:6px;margin:6px 0"><input id="mve-showbtn" type="checkbox"> 显示右下角「译」按钮（隐藏后可用脚本菜单打开本设置）</label>' +
+            '<label style="display:flex;align-items:center;gap:6px;margin:6px 0"><input id="mve-dedup" type="checkbox"> 启用翻页去重（刷新生效）</label>' +
+            '<label style="display:flex;align-items:center;gap:6px;margin:6px 0"><input id="mve-grid" type="checkbox"> 启用片单网格化（刷新生效）</label>' +
+            '<label style="display:flex;align-items:center;gap:6px;margin:6px 0"><input id="mve-preview" type="checkbox"> 预览独占：同时只播放一个预览视频（刷新生效）</label>' +
+            '</div>' +
+            '</details>' +
+            '<details style="border-top:1px solid #2e3440">' +
+            '<summary style="' + secStyle + '">数据（缓存 / 备份）</summary>' +
+            '<div style="' + boxStyle + '">' +
+            '<div style="display:flex;gap:8px;margin-top:6px">' +
+            '<button id="mve-export" style="flex:1;' + ghostBtn + '">导出配置+缓存</button>' +
+            '<button id="mve-import" style="flex:1;' + ghostBtn + '">导入</button>' +
             '<input id="mve-import-file" type="file" accept=".json,application/json" style="display:none">' +
             '</div>' +
-            '<div style="margin-top:6px;font-size:11px;color:#8b93a5">导出文件含明文 API Key，注意保管；可存入 iCloud 云盘跨浏览器导入</div>' +
             '<div style="display:flex;gap:8px;margin-top:8px">' +
-            '<button id="mve-retry" style="flex:1;padding:6px;border:1px solid #4c566a;border-radius:6px;background:transparent;color:#d7dee9;cursor:pointer">重查未收录</button>' +
-            '<button id="mve-diag" style="flex:1;padding:6px;border:1px solid #4c566a;border-radius:6px;background:transparent;color:#d7dee9;cursor:pointer">诊断</button>' +
+            '<button id="mve-clear" style="flex:1;' + ghostBtn + '">清缓存</button>' +
+            '</div>' +
+            '<div style="margin-top:6px;font-size:11px;color:#8b93a5">导出文件含明文 API Key，注意保管；可存入 iCloud 云盘跨浏览器导入</div>' +
+            '</div>' +
+            '</details>' +
+            '<details style="border-top:1px solid #2e3440">' +
+            '<summary style="' + secStyle + '">诊断与重查</summary>' +
+            '<div style="' + boxStyle + '">' +
+            '<div style="display:flex;gap:8px;margin-top:6px">' +
+            '<button id="mve-retry" style="flex:1;' + ghostBtn + '">重查未收录</button>' +
+            '<button id="mve-diag" style="flex:1;' + ghostBtn + '">诊断</button>' +
             '</div>' +
             '<pre id="mve-diag-out" style="display:none;margin-top:6px;padding:8px;border-radius:6px;background:#12151d;color:#9db8dd;font-size:11px;white-space:pre-wrap;word-break:break-all;max-height:180px;overflow:auto"></pre>' +
+            '</div>' +
+            '</details>' +
             '<div id="mve-msg" style="margin-top:8px;font-size:12px;color:#9db8dd;min-height:14px"></div>';
         document.body.appendChild(panel);
 
@@ -1494,7 +1599,6 @@
                 baseUrl,
                 apiKey: panel.querySelector('#mve-key').value.trim(),
                 model,
-                mode: panel.querySelector('#mve-mode-llm').checked ? 'llm' : 'ja',
                 titlesEnabled: panel.querySelector('#mve-enabled').checked,
                 dedupEnabled: panel.querySelector('#mve-dedup').checked,
                 gridEnabled: panel.querySelector('#mve-grid').checked,
@@ -1504,7 +1608,7 @@
             btn.style.display = config.showButton ? '' : 'none';
             saveConfig(config);
             lastError = null;
-            msg('已保存' + (config.mode === 'llm' && !config.apiKey ? '（未填 Key：GetAV 精校中文照常使用，未收录的保持原标题）' : ''));
+            msg('已保存' + (!config.apiKey ? '（未填 Key：GetAV 精校 / Jable 中文照常使用，未收录的保持原标题）' : ''));
             togglePanel();
             enhanceTitles();
         });
@@ -1549,6 +1653,28 @@
         add('脚本版本', ver + '（站点：' + SITE + '）');
         add('GM_xhr', typeof GM_xmlhttpRequest === 'function' ? '✓ 存在' : '✗ 不存在（GetAV 跨站查询无法工作）');
         add('GM 存储', hasGM ? '✓ 存在' : '✗ 不存在（用 localStorage 兜底，缓存不跨站共享）');
+        if (SITE === 'getav') {
+            add('React 水合', !hydrationInfo.checked ? '等待中（门控尚未放行）'
+                : (hydrationInfo.hydrated ? '✓ 已检测到 React 接管' : '✗ 未检测到 React') +
+                  '，放行原因 ' + hydrationInfo.why + '，等待 ' + hydrationInfo.waitedMs + 'ms');
+            add('文本改写', 'nodeValue ' + textWrites.node + ' 次 / 整块替换 ' + textWrites.block + ' 次' +
+                (textWrites.samples.length ? '（' + textWrites.samples.join('，') + '）' : ''));
+        }
+        // 当前页卡片识别情况：排查「首页/某类页面标题不替换」时一眼看出是没识别到卡片，
+        // 还是识别到了但两个中文源都没收录
+        try {
+            const cardsNow = collectCards();
+            const uniq = [...new Set(cardsNow.map((c) => c.slug))];
+            const src = { getav: 0, jable: 0, llm: 0 };
+            uniq.forEach((s) => {
+                const h = cache[s];
+                if (h && h.zh) src[h.zhSrc && src[h.zhSrc] !== undefined ? h.zhSrc : 'llm']++;
+            });
+            add('页面卡片', cardsNow.length + ' 个标题链接 / ' + uniq.length + ' 个番号');
+            add('缓存中文', 'getav ' + src.getav + ' / jable ' + src.jable + ' / llm ' + src.llm);
+        } catch (e) {
+            add('页面卡片', '识别失败：' + (e && e.message));
+        }
         const keys = Object.keys(cache);
         const zhN = keys.filter((k) => cache[k] && cache[k].zh).length;
         const missN = keys.filter((k) => cache[k] && cache[k].getavMiss).length;
@@ -1632,6 +1758,7 @@
                 if (data.config && typeof data.config === 'object') {
                     // Object.assign 补齐新增字段默认值，旧版本备份也能安全导入
                     config = Object.assign({}, DEFAULTS, data.config);
+                    delete config.mode; // 旧备份里的「日文原标题」字段已废弃
                     saveConfig(config);
                 }
                 let cacheCount = 0;
@@ -1677,14 +1804,13 @@
             panel.querySelector('#mve-key').value = config.apiKey;
             panel.querySelector('#mve-model').value = config.model;
             updateProviderUI();
-            panel.querySelector(config.mode === 'llm' ? '#mve-mode-llm' : '#mve-mode-ja').checked = true;
             panel.querySelector('#mve-enabled').checked = config.titlesEnabled;
             panel.querySelector('#mve-dedup').checked = config.dedupEnabled;
             panel.querySelector('#mve-grid').checked = config.gridEnabled;
             panel.querySelector('#mve-preview').checked = config.previewExclusive;
             panel.querySelector('#mve-showbtn').checked = config.showButton;
             if (lastError) msg('上次出错：' + lastError);
-            else msg(config.mode === 'llm' && !config.apiKey ? '重译模式需先选择大模型服务并填入 API Key' : '');
+            else msg(!config.apiKey ? '未填 API Key：只用 GetAV / Jable 免费中文源，未收录的保持原标题' : '');
         }
     }
 
@@ -1695,7 +1821,14 @@
      * 首次渲染可能有极短暂的截断闪现，Observer 会立即修正。
      * ================================================================ */
 
-    const isGetavSubscriptionsPage = SITE === 'getav' && /\/profile\/subscriptions/.test(location.pathname);
+    /**
+     * 当前是否 GetAV 订阅页。用函数而非常量：GetAV 是 Next.js 客户端路由，
+     * 站内跳转不会重新加载脚本——常量会在脚本加载时定死，之后从别的页面
+     * 点进订阅页就永远不生效（用户实测「首次进入没反应、刷新后才好」即此）。
+     */
+    function isGetavSubscriptionsPage() {
+        return SITE === 'getav' && /\/profile\/subscriptions/.test(location.pathname);
+    }
 
     /** querySelectorAll 的补充：动态加载时新增节点本身可能也匹配选择器，需把 root 自身纳入 */
     function queryAllWithSelf(root, selector) {
@@ -1727,8 +1860,9 @@
             overflow: visible !important;
         }
         `;
-        if (isGetavSubscriptionsPage) {
-            css += `
+        // 订阅页样式常驻注入（只在 #getav-sub-grid 存在时生效）：
+        // SPA 跳转到订阅页不会再走一遍 init，按路径条件注入会漏掉样式
+        css += `
         /* ============ 订阅页：网格 ============ */
         #getav-sub-grid {
             display: grid !important;
@@ -1873,7 +2007,6 @@
             transform: scale(1.12) rotate(-6deg) !important;
         }
         `;
-        }
         const style = document.createElement('style');
         style.id = 'getav-full-title-style';
         style.textContent = css;
@@ -1933,7 +2066,7 @@
     }
 
     function makeGetavThreeColumns() {
-        if (!isGetavSubscriptionsPage) return;
+        if (!isGetavSubscriptionsPage()) return;
         const containers = document.querySelectorAll('div.divide-y');
         for (const c of containers) {
             if (c.id === 'getav-sub-grid') continue;
@@ -1975,7 +2108,7 @@
             const t = el.getAttribute('title');
             if (t && (el.textContent.includes('…') || el.textContent.includes('...') ||
                 el.textContent.trim().length < t.trim().length / 2)) {
-                el.textContent = t;
+                setTextSafe(el, t);
             }
         }
     }
@@ -2100,12 +2233,113 @@
         } catch (e) { /* 连兜底都失败就只能放弃 */ }
     }
 
+    /* ---------------- React 水合门控（GetAV 专用） ----------------
+     * GetAV 现在是 React（Next.js）应用。React 水合时会把服务端 HTML 与客户端
+     * 首次渲染逐节点比对：只要我们在水合完成前改过文本、插过节点（哪怕只是补全
+     * 截断标题、注入一个「译」按钮），React 就判定不一致并抛 #418
+     * 「Hydration failed…this tree will be regenerated on the client」，
+     * 随后丢弃整棵服务端 DOM 重新渲染——注入的按钮/面板消失、标题改写被还原。
+     * 所以 GetAV 上的一切 DOM 写入都推迟到水合完成之后。
+     */
+
+    const hydrationInfo = { checked: false, hydrated: false, waitedMs: 0, why: '' };
+
+    /** React 接管 DOM 后会给真实节点挂 __reactFiber$ / __reactProps$ 内部属性（水合完成的可靠信号） */
+    function hasReactFiber() {
+        const root = document.body;
+        if (!root) return false;
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+        let n = 0;
+        let el = root;
+        // 前 300 个元素足够覆盖页头/首屏（React 水合会给所有真实节点挂 fiber）
+        while (el && n++ < 300) {
+            const keys = Object.keys(el);
+            for (let i = 0; i < keys.length; i++) {
+                if (keys[i].indexOf('__reactFiber$') === 0 || keys[i].indexOf('__reactProps$') === 0) {
+                    return true;
+                }
+            }
+            el = walker.nextNode();
+        }
+        return false;
+    }
+
+    /**
+     * 等 React 水合完成再执行（仅 GetAV 需要；其他站点不是 React，直接执行）。
+     * 放行条件：检测到 fiber 属性 + 最近 300ms 页面无 childList 变动（避开水合后的
+     * 首批数据渲染）；检测到后最多再等 1.5 秒，整体最多 8 秒兜底放行，避免非 React
+     * 页面或异常页面被永久卡住。
+     */
+    function whenHydrated(cb) {
+        if (SITE !== 'getav') { cb(); return; }
+        const t0 = Date.now();
+        let lastMutation = Date.now();
+        let hydratedAt = 0;
+        const mo = new MutationObserver(() => { lastMutation = Date.now(); });
+        try {
+            mo.observe(document.documentElement, { childList: true, subtree: true });
+        } catch (e) { log('水合观察器启动失败：', e); }
+        const finish = (why) => {
+            mo.disconnect();
+            hydrationInfo.checked = true;
+            hydrationInfo.hydrated = !!hydratedAt;
+            hydrationInfo.waitedMs = Date.now() - t0;
+            hydrationInfo.why = why;
+            log('水合门控放行（' + why + '），等待 ' + hydrationInfo.waitedMs + 'ms');
+            cb();
+        };
+        const tick = () => {
+            if (!hydratedAt && hasReactFiber()) hydratedAt = Date.now();
+            const quiet = Date.now() - lastMutation >= 300;
+            if (hydratedAt && (quiet || Date.now() - hydratedAt > 1500)) return finish('react');
+            if (Date.now() - t0 > 8000) return finish(hydratedAt ? 'react-timeout' : 'no-react-timeout');
+            setTimeout(tick, 100);
+        };
+        tick();
+    }
+
+    /** DOM 变化监听：兼容动态加载、MissAV Plus 标题重渲染、Jable AJAX 翻页、GetAV 客户端路由 */
+    function startObserver() {
+        new MutationObserver(() => {
+            debouncedRelocate();
+            debouncedReapplyTitles();
+        }).observe(document.body, { childList: true, subtree: true });
+    }
+
+    /**
+     * 标题链启动节奏：首屏 800ms 跑一次，2.5s / 6s 再补两次。
+     * 首页（MissAV 推荐位、Jable 的 AJAX 分区等）内容比列表页晚到，只跑一次会漏；
+     * 各站流程都有「无网络工作即早退」，全部命中缓存时补跑零请求、不闪按钮状态。
+     */
+    function scheduleTitleRuns() {
+        if (!config.titlesEnabled) return;
+        [800, 2500, 6000].forEach((ms) => setTimeout(() => safe('titles', enhanceTitles), ms));
+        window.addEventListener('pageshow', () => safe('titles', enhanceTitles));
+    }
+
     function init() {
         // 极端环境兜底：部分手机浏览器在 document-idle 时 body 尚未就绪，
         // appendChild 会抛错——等 body 出现再初始化（最多约 10 秒）
         if (!document.body) {
             waitFor(() => !!document.body, { interval: 200, tries: 50 }).then((ok) => {
                 if (ok) init();
+            });
+            return;
+        }
+        // 菜单入口无 DOM 依赖，最先注册：水合门控/模块异常都不会让用户失去入口
+        if (typeof GM_registerMenuCommand === 'function') {
+            const menuLabel = { jable: 'Jable 标题增强设置', getav: 'GetAV 增强设置' }[SITE] || 'MissAV 综合增强设置';
+            GM_registerMenuCommand(menuLabel, togglePanel);
+        }
+        // GetAV 是 React 应用：水合前任何 DOM 写入都会触发 #418 并被整棵重建，
+        // 因此设置入口、界面增强、标题链、Observer 全部等水合完成后再启动
+        if (SITE === 'getav') {
+            whenHydrated(() => {
+                safe('settings-ui', buildUI);
+                if (!btn) buildFallbackButton(); // 面板没建出来 → 放兜底按钮报告原因
+                safe('getav-ui', initGetavUi);
+                scheduleTitleRuns();
+                safe('observer', startObserver);
             });
             return;
         }
@@ -2121,23 +2355,9 @@
             if (config.previewExclusive) safe('preview', initPreviewExclusive);
             safe('missav-ui', initMissavUi);
         }
-        if (SITE === 'getav') safe('getav-ui', initGetavUi);
         if (SITE === 'jable') safe('jable-ui', initJableUi);
-        if (config.titlesEnabled) {
-            // 等去重和首屏渲染稳定后再处理标题
-            setTimeout(() => safe('titles', enhanceTitles), 800);
-        }
-        // 兼容动态加载与 MissAV Plus 的标题重渲染 / 筛选条注入
-        safe('observer', () => {
-            new MutationObserver(() => {
-                debouncedRelocate();
-                debouncedReapplyTitles();
-            }).observe(document.body, { childList: true, subtree: true });
-        });
-        if (typeof GM_registerMenuCommand === 'function') {
-            const menuLabel = { jable: 'Jable 标题增强设置', getav: 'GetAV 增强设置' }[SITE] || 'MissAV 综合增强设置';
-            GM_registerMenuCommand(menuLabel, togglePanel);
-        }
+        scheduleTitleRuns();
+        safe('observer', startObserver);
     }
 
     if (document.readyState === 'loading') {
