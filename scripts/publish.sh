@@ -143,7 +143,7 @@ if [ "$DRY_RUN" = 1 ]; then
     ok "将推送 $BRANCH 与 $tag 到 $REMOTE"
 else
     if git -c http.proxy="$PROXY" push "$REMOTE" "$BRANCH" "$tag"; then
-        ok "已推送到 GitHub（走代理 $PROXY）"
+        ok "已推送到 GitHub（走代理 ${PROXY}）"
     else
         warn "代理推送失败，退回直连重试…"
         git push "$REMOTE" "$BRANCH" "$tag"
