@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      4.0.25
+// @version      4.0.26
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → JAVD 精校中字 → Jable 官方繁中 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -1594,11 +1594,16 @@
     }
 
     /** 手机端手动验证 JAVD：顶层页面通过后，标题写入跨站共享 GM 缓存。 */
+    function isLikelyVideoSlug(slug) {
+        return !!slug && /[a-z]{2,}[a-z0-9]*[-_][a-z0-9]*\d/i.test(slug);
+    }
+
     function openJavdVerifyPage() {
-        const card = collectCards().find((c) => c && c.slug);
-        const slug = card ? card.slug : slugFromHref(location.href);
+        const card = collectCards().find((c) => c && isLikelyVideoSlug(c.slug));
+        const pageSlug = slugFromHref(location.href);
+        const slug = card ? card.slug : (isLikelyVideoSlug(pageSlug) ? pageSlug : null);
         if (!slug) {
-            msg('当前页面没有识别到番号');
+            msg('当前页面没有识别到有效番号，请进入具体影片详情页后再试');
             return;
         }
         const url = 'https://cn.javd.me/v/' + encodeURIComponent(slug);
@@ -1792,7 +1797,7 @@
         let diagnosticSlug = 'jur-857';
         try {
             const cardsNow = collectCards();
-            const uniq = [...new Set(cardsNow.map((c) => c.slug))];
+            const uniq = [...new Set(cardsNow.map((c) => c.slug).filter(isLikelyVideoSlug))];
             if (uniq[0]) diagnosticSlug = uniq[0];
             const src = { javd: 0, jable: 0, llm: 0 };
             uniq.forEach((s) => {
