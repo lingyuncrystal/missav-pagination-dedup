@@ -6,6 +6,17 @@
 
 > ⚠️ **迁移提示（v3.0.0 起）**：本脚本由原「MissAV 列表增强（翻页去重 + 标题重译）」与「MissAV 片单网格化」合并而来，`@name` 已变更，Tampermonkey 会视为新脚本。请**先删除两个旧脚本，再安装本脚本**，避免重复运行。原有配置（API Key 等）与标题缓存会自动继承，无需重填。
 
+## 正式版 / 研发版
+
+本项目分为两个可并行安装的环境：
+
+- **正式版（main）**：<https://raw.githubusercontent.com/lingyuncrystal/missav-pagination-dedup/main/missav-enhancer.user.js>
+- **研发版（dev）**：<https://raw.githubusercontent.com/lingyuncrystal/missav-pagination-dedup/dev/missav-enhancer.user.js>
+
+研发版使用独立的脚本名称和命名空间，可以和正式版同时安装。研发版只推送 GitHub，不同步到 SleazyFork。
+
+研发流程：在 `dev` 分支修改并运行 `./scripts/publish-dev.sh "研发说明"`，手机安装研发版 Raw 地址验证；确认稳定后，将 `dev` 合并到 `main`，恢复正式元数据、递增正式版本号，再运行正式的 `./scripts/publish.sh`。
+
 ## 功能一：翻页去重
 
 MissAV 列表页码翻页时，服务端常在页边界返回与之前页面重复的影片（实测第 6→7 页重叠 1 部、7→8 页重叠 3 部）。本脚本按「列表 + 页码」记住看过的番号，往后翻页时自动隐藏重复卡片，并在页面顶部显示「已隐藏 N 部」提示条。只向前去重，往回翻不受影响；按会话存储，关掉标签页自动清空。
