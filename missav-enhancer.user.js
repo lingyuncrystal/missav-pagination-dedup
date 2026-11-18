@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      4.0.24
+// @version      4.0.25
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → JAVD 精校中字 → Jable 官方繁中 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -749,6 +749,28 @@
 
     const JAVD_BRIDGE_TIMEOUT = 35000;
 
+    function javdVerifiedKey(slug) {
+        return 'javd-verified-title:' + slug;
+    }
+
+    function loadJavdVerifiedTitle(slug) {
+        try {
+            const raw = typeof GM_getValue === 'function' ? GM_getValue(javdVerifiedKey(slug), null) : null;
+            const item = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : null;
+            return item && item.title ? item.title : null;
+        } catch {
+            return null;
+        }
+    }
+
+    function saveJavdVerifiedTitle(slug, title) {
+        try {
+            if (typeof GM_setValue === 'function') {
+                GM_setValue(javdVerifiedKey(slug), JSON.stringify({ title, at: Date.now() }));
+            }
+        } catch {}
+    }
+
     function fetchJavdViaBrowser(slug) {
         return new Promise((resolve, reject) => {
             const frame = document.createElement('iframe');
@@ -780,31 +802,19 @@
         });
     }
 
-    function initJavdBridge() {
-        if (window.top === window) return;
+    function initJavdManualPage() {
         const slug = slugFromHref(location.href);
         if (!slug) return;
-        const requestId = new URL(location.href).searchParams.get('mveRequest') || '';
-        if (!requestId) return;
         const started = Date.now();
         const poll = setInterval(() => {
             const title = extractJavdTitle(document, slug);
             if (title) {
                 clearInterval(poll);
-                window.parent.postMessage({
-                    type: 'mve-javd-title',
-                    requestId,
-                    slug,
-                    title,
-                }, '*');
+                saveJavdVerifiedTitle(slug, title);
+                log('JAVD 顶层页面验证完成，标题已写入共享缓存：' + slug);
             } else if (Date.now() - started > JAVD_BRIDGE_TIMEOUT - 1000) {
                 clearInterval(poll);
-                window.parent.postMessage({
-                    type: 'mve-javd-title',
-                    requestId,
-                    slug,
-                    error: '页面未通过 Cloudflare 验证或未找到标题',
-                }, '*');
+                log('JAVD 顶层页面验证超时：' + slug);
             }
         }, 500);
     }
@@ -816,13 +826,9 @@
     async function fetchJavdTitle(slug) {
         const hit = cache[slug];
         if (hit && hit.javdMiss && Date.now() - hit.javdMiss < MISS_TTL) return null;
+        const verified = loadJavdVerifiedTitle(slug);
+        if (verified) return verified;
         try {
-            // 先走真实浏览器页面，适配手机端 Cloudflare；桥接失败再回退 GM_xhr。
-            try {
-                return await fetchJavdViaBrowser(slug);
-            } catch (bridgeError) {
-                log('JAVD 浏览器桥接失败，回退 GM_xhr ' + slug, bridgeError);
-            }
             const r = await httpGet('https://cn.javd.me/v/' + encodeURIComponent(slug));
             if (r.status < 200 || r.status >= 300) {
                 // 404 = 确认未收录，写负缓存；429/403 挑战页等异常不写，下次重试
@@ -1587,6 +1593,23 @@
         }
     }
 
+    /** 手机端手动验证 JAVD：顶层页面通过后，标题写入跨站共享 GM 缓存。 */
+    function openJavdVerifyPage() {
+        const card = collectCards().find((c) => c && c.slug);
+        const slug = card ? card.slug : slugFromHref(location.href);
+        if (!slug) {
+            msg('当前页面没有识别到番号');
+            return;
+        }
+        const url = 'https://cn.javd.me/v/' + encodeURIComponent(slug);
+        const tab = window.open(url, '_blank');
+        if (tab) {
+            msg('已打开 JAVD 验证页：完成验证后返回此页，再点「重查未收录」');
+        } else {
+            msg('手机浏览器拦截了新标签页，请允许弹窗后重试');
+        }
+    }
+
     function buildUI() {
         btn = document.createElement('button');
         btnLabel = document.createTextNode('译'); // 用文本节点改字，避免覆盖状态点小圆点
@@ -1668,6 +1691,7 @@
             '<button id="mve-retry" style="flex:1;' + ghostBtn + '">重查未收录</button>' +
             '<button id="mve-diag" style="flex:1;' + ghostBtn + '">诊断</button>' +
             '</div>' +
+            '<button id="mve-javd-verify" style="width:100%;margin-top:8px;' + ghostBtn + '">打开 JAVD 验证页</button>' +
             '<pre id="mve-diag-out" style="display:none;margin-top:6px;padding:8px;border-radius:6px;background:#12151d;color:#9db8dd;font-size:11px;white-space:pre-wrap;word-break:break-all;max-height:180px;overflow:auto"></pre>' +
             '</div>' +
             '</details>' +
@@ -1727,6 +1751,7 @@
             importFile.value = ''; // 允许重复导入同一个文件
         });
         panel.querySelector('#mve-diag').addEventListener('click', runDiagnostics);
+        panel.querySelector('#mve-javd-verify').addEventListener('click', openJavdVerifyPage);
         // 「重查未收录」：清掉 JAVD/Jable 的负缓存标记并立即重跑标题链。
         // 适用场景：明知某站刚收录了新片（负缓存 24h 内），不想等自动过期
         panel.querySelector('#mve-retry').addEventListener('click', () => {
@@ -1784,13 +1809,10 @@
         const missN = keys.filter((k) => cache[k] && cache[k].javdMiss).length;
         add('缓存', keys.length + ' 条（含中文 ' + zhN + '，JAVD 负缓存 ' + missN + '）');
         if (SITE !== 'getav' && SITE !== 'javd') {
-            add('JAVD 浏览器桥接', '测试中（番号 ' + diagnosticSlug + '）…');
-            try {
-                const t = await fetchJavdViaBrowser(diagnosticSlug);
-                lines[lines.length - 1] = 'JAVD 浏览器桥接：✓ 标题：' + t.slice(0, 60);
-            } catch (e) {
-                lines[lines.length - 1] = 'JAVD 浏览器桥接：✗ ' + e.message + '（若页面可手动打开，请确认脚本已更新到 4.0.24）';
-            }
+            const verified = loadJavdVerifiedTitle(diagnosticSlug);
+            add('JAVD 手动验证', verified
+                ? '✓ 已缓存标题：' + verified.slice(0, 60)
+                : '未验证；点击「打开 JAVD 验证页」，完成后返回再点「重查未收录」');
             out.textContent = lines.join('\n');
         }
         if (SITE !== 'jable' && typeof GM_xmlhttpRequest === 'function') {
@@ -2463,9 +2485,9 @@
 
     if (SITE === 'javd') {
         if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', initJavdBridge, { once: true });
+            document.addEventListener('DOMContentLoaded', initJavdManualPage, { once: true });
         } else {
-            initJavdBridge();
+            initJavdManualPage();
         }
     } else if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
