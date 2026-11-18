@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.4
+// @version      4.0.30-dev.5
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Jable 繁中 → Manko → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -1773,6 +1773,14 @@
         out.style.display = 'block';
         const lines = [];
         const add = (k, v) => { lines.push(k + '：' + v); out.textContent = lines.join('\n'); };
+        const diagnosticSlug = (() => {
+            try {
+                const card = collectCards().find((c) => c && c.slug && /\d/.test(c.slug));
+                return (card && card.slug) || 'jur-857';
+            } catch {
+                return 'jur-857';
+            }
+        })();
         const ver = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '?';
         add('脚本版本', ver + '（站点：' + SITE + '）');
         add('GM_xhr', typeof GM_xmlhttpRequest === 'function' ? '✓ 存在' : '✗ 不存在（GetAV 跨站查询无法工作）');
@@ -1839,13 +1847,22 @@
             out.textContent = lines.join('\n');
             add('Jable 层状态', jableBlocked ? '本会话已停用（' + jableBlockReason + '）' : '正常');
         }
-        if (SITE === 'missav') {
-            add('日文页抓取', '测试中…');
+        if (typeof GM_xmlhttpRequest === 'function') {
+            add('Manko 查询', '测试中（番号 ' + diagnosticSlug + '）…');
             try {
-                const m = await fetchJaTitles(jaDetailUrl('jur-857'), true);
-                lines[lines.length - 1] = '日文页抓取：' + (m['jur-857'] ? '✓ ' + m['jur-857'].slice(0, 40) : '✗ 页面打开但无合规标题（可能被重定向）');
+                const list = await fetchMankoApi('swx/movie/search?keyword=' + encodeURIComponent(diagnosticSlug) + '&size=24&page=1');
+                const rows = Array.isArray(list) ? list : (Array.isArray(list && list.data) ? list.data : []);
+                const row = rows.find((x) => String(x && x.title || '').toLowerCase() === diagnosticSlug.toLowerCase()) || rows[0];
+                if (!row || !row._id) {
+                    lines[lines.length - 1] = 'Manko 查询：搜索 HTTP 200，但未找到匹配番号';
+                } else {
+                    const detail = await fetchMankoApi('swx/movie/detail/' + encodeURIComponent(row._id));
+                    const title = pickMankoChineseTitle(detail, diagnosticSlug);
+                    lines[lines.length - 1] = 'Manko 查询：搜索/详情 HTTP 200' +
+                        (title ? '，✓ 中文资料：' + title.slice(0, 60) : '，但详情没有合规中文标题/简介');
+                }
             } catch (e) {
-                lines[lines.length - 1] = '日文页抓取：✗ ' + e.message;
+                lines[lines.length - 1] = 'Manko 查询：✗ 失败——' + e.message + '（可能是网络、后端域名或 @connect 授权限制）';
             }
             out.textContent = lines.join('\n');
         }
