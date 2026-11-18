@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      4.0.22
+// @version      4.0.23
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → JAVD 精校中字 → Jable 官方繁中 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -12,6 +12,7 @@
 // @match        https://missav.com/*
 // @match        https://missav.ai/*
 // @match        https://jable.tv/*
+// @match        https://cn.javd.me/*
 // @match        *://getav.net/*
 // @match        *://*.getav.net/*
 // MissAV 经常更换域名后缀，用 @include 正则兜底所有 missav.<TLD> 变体
@@ -42,8 +43,9 @@
 
     const LOG_PREFIX = '[MissAV 综合增强]';
 
-    /** 站点识别：rescue/grid/dedup/preview 是 MissAV 专属，getav-ui 是 GetAV 专属；titles 与设置面板三站共用 */
+    /** 站点识别：JAVD 仅运行桥接器；rescue/grid/dedup/preview 是 MissAV 专属，getav-ui 是 GetAV 专属 */
     const SITE = /(^|\.)jable\.tv$/i.test(location.hostname) ? 'jable'
+        : /(^|\.)cn\.javd\.me$/i.test(location.hostname) ? 'javd'
         : /(^|\.)getav\.net$/i.test(location.hostname) ? 'getav'
         : 'missav';
 
@@ -718,10 +720,9 @@
         });
     }
 
-    /** 从 JAVD 视频页 HTML 解析中文标题；404 / 未收录返回 null */
-    function parseJavdTitle(html, slug) {
-        if (!html) return null;
-        const doc = new DOMParser().parseFromString(html, 'text/html');
+    /** 从 JAVD 文档解析中文标题；必须包含番号，避免写入 Cloudflare 挑战页。 */
+    function extractJavdTitle(doc, slug) {
+        if (!doc) return null;
         // 站点结构变动时依次尝试详情标题、OG 标题和页面标题；
         // 最终仍以「必须包含番号」防止把 Cloudflare/首页文本写入缓存。
         const candidates = [...doc.querySelectorAll('h1, .video-title, .title, [class*="video-title"], [class*="title"]')]
@@ -735,6 +736,79 @@
         return t;
     }
 
+    /** 从 JAVD 视频页 HTML 解析中文标题；404 / 未收录返回 null */
+    function parseJavdTitle(html, slug) {
+        if (!html) return null;
+        return extractJavdTitle(new DOMParser().parseFromString(html, 'text/html'), slug);
+    }
+
+    /* ---------------- JAVD 浏览器桥接 ----------------
+     * 移动端脚本管理器的 GM_xhr 常被 JAVD 的 Cloudflare 规则拦截（429/网络错误）。
+     * 当前脚本同时匹配 JAVD 详情页：隐藏 iframe 由真实浏览器加载并完成验证，
+     * iframe 内脚本读取标题后用 postMessage 回传，绕过移动端 GM_xhr 的限制。 */
+
+    const JAVD_BRIDGE_TIMEOUT = 35000;
+
+    function fetchJavdViaBrowser(slug) {
+        return new Promise((resolve, reject) => {
+            const frame = document.createElement('iframe');
+            const requestId = 'mve-javd-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+            frame.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;border:0;opacity:0;pointer-events:none;';
+            frame.src = 'https://cn.javd.me/v/' + encodeURIComponent(slug) + '?_mve=' + Date.now().toString(36) + '&mveRequest=' + encodeURIComponent(requestId);
+            let settled = false;
+            const cleanup = () => {
+                window.removeEventListener('message', onMessage);
+                clearTimeout(timer);
+                frame.remove();
+            };
+            const finish = (fn, value) => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                fn(value);
+            };
+            const onMessage = (event) => {
+                const data = event.data;
+                if (event.source !== frame.contentWindow || !data ||
+                    data.type !== 'mve-javd-title' || data.requestId !== requestId || data.slug !== slug) return;
+                if (data.title) finish(resolve, data.title);
+                else finish(reject, new Error(data.error || 'JAVD 浏览器桥接未解析到标题'));
+            };
+            const timer = setTimeout(() => finish(reject, new Error('JAVD 浏览器桥接超时')), JAVD_BRIDGE_TIMEOUT);
+            window.addEventListener('message', onMessage);
+            (document.body || document.documentElement).appendChild(frame);
+        });
+    }
+
+    function initJavdBridge() {
+        if (window.top === window) return;
+        const slug = slugFromHref(location.href);
+        if (!slug) return;
+        const requestId = new URL(location.href).searchParams.get('mveRequest') || '';
+        if (!requestId) return;
+        const started = Date.now();
+        const poll = setInterval(() => {
+            const title = extractJavdTitle(document, slug);
+            if (title) {
+                clearInterval(poll);
+                window.parent.postMessage({
+                    type: 'mve-javd-title',
+                    requestId,
+                    slug,
+                    title,
+                }, '*');
+            } else if (Date.now() - started > JAVD_BRIDGE_TIMEOUT - 1000) {
+                clearInterval(poll);
+                window.parent.postMessage({
+                    type: 'mve-javd-title',
+                    requestId,
+                    slug,
+                    error: '页面未通过 Cloudflare 验证或未找到标题',
+                }, '*');
+            }
+        }, 500);
+    }
+
     /**
      * 按番号查 JAVD 中文标题。命中返回标题文本；未收录返回 null 并写负缓存；
      * 网络失败 / 异常页面返回 null 但【不写】负缓存（下次重试）。
@@ -743,9 +817,15 @@
         const hit = cache[slug];
         if (hit && hit.javdMiss && Date.now() - hit.javdMiss < MISS_TTL) return null;
         try {
+            // 先走真实浏览器页面，适配手机端 Cloudflare；桥接失败再回退 GM_xhr。
+            try {
+                return await fetchJavdViaBrowser(slug);
+            } catch (bridgeError) {
+                log('JAVD 浏览器桥接失败，回退 GM_xhr ' + slug, bridgeError);
+            }
             const r = await httpGet('https://cn.javd.me/v/' + encodeURIComponent(slug));
             if (r.status < 200 || r.status >= 300) {
-                // 404 = 确认未收录，写负缓存；5xx 等异常不写，下次重试
+                // 404 = 确认未收录，写负缓存；429/403 挑战页等异常不写，下次重试
                 if (r.status === 404) {
                     cache[slug] = Object.assign(cache[slug] || {}, { javdMiss: Date.now() });
                 }
@@ -2382,7 +2462,13 @@
         safe('observer', startObserver);
     }
 
-    if (document.readyState === 'loading') {
+    if (SITE === 'javd') {
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initJavdBridge, { once: true });
+        } else {
+            initJavdBridge();
+        }
+    } else if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
     } else {
         init();
