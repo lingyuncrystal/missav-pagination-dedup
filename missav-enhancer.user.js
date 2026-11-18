@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      4.0.21
-// @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
+// @version      4.0.22
+// @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → JAVD 精校中字 → Jable 官方繁中 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
 // @icon         https://missav.ws/favicon.ico
@@ -22,7 +22,7 @@
 // @grant        GM_getValue
 // @grant        GM_xmlhttpRequest
 // @grant        GM_registerMenuCommand
-// @connect      getav.net
+// @connect      cn.javd.me
 // @connect      jable.tv
 // @connect      api.moonshot.cn
 // @connect      api.deepseek.com
@@ -134,8 +134,8 @@
             const raw = (seg[seg.length - 1] || '').toLowerCase();
             if (!raw) return null;
             // MissAV 给带字幕/无码版本的详情页 URL 追加后缀（如 ipzz-963-chinese-subtitle）。
-            // 番号是跨站同一性主键（缓存键 + GetAV 查询参数），必须剥掉后缀还原成标准番号，
-            // 否则 GetAV 查询全部 404、缓存键被污染、跨站复用失效。
+            // 番号是跨站同一性主键（缓存键 + JAVD 查询参数），必须剥掉后缀还原成标准番号，
+            // 否则 JAVD 查询全部 404、缓存键被污染、跨站复用失效。
             return raw.replace(/-(chinese-subtitle|english-subtitle|uncensored-leak|uncensored)$/i, '') || null;
         } catch {
             return null;
@@ -207,7 +207,7 @@
             //    只用 class 不加内联样式：装了 MissAV Plus 的用户由其
             //    「完整标题」等设置接管显示效果，未装则为单行截断。
             //    该结构同时被 titles 模块的 collectCards 识别，
-            //    因此片单页标题也能自动获得统一的中文标题（缓存/GetAV/Jable/大模型）。
+            //    因此片单页标题也能自动获得统一的中文标题（缓存/JAVD/Jable/大模型）。
             if (thumbnail && label) {
                 const href = (thumbnail.querySelector('a[href]') || {}).href || '#';
                 const titleDiv = document.createElement('div');
@@ -410,7 +410,7 @@
     }
 
     /* ================================================================
-     * 模块五 titles：标题修正（中文标题链：缓存 → GetAV → Jable → 大模型）
+     * 模块五 titles：标题修正（中文标题链：缓存 → JAVD → Jable → 大模型）
      * 大模型服务商预设见 PROVIDERS：选中即自动填好地址与默认模型，
      * 用户只需粘贴 Key；「自定义」保留手填入口（OpenAI 兼容接口）。
      * Jable 走独立流程：中文原标题封面加「字幕」徽章，日文原标题
@@ -477,10 +477,10 @@
     }
 
     /* ---------------- 中文标题来源优先级 ----------------
-     * getav（精校中字，最准）> jable（官方繁中）> llm（大模型译文）。
+     * javd（精校中字，最准）> jable（官方繁中）> llm（大模型译文）。
      * 高优先级来源可以覆盖低优先级；低优先级永远不能覆盖高优先级。
      * 旧缓存条目没有 zhSrc 字段：有 zh 即视为 llm 级（1）。 */
-    const ZH_SRC_PRIORITY = { getav: 3, jable: 2, llm: 1 };
+    const ZH_SRC_PRIORITY = { javd: 3, jable: 2, llm: 1 };
 
     /** 按优先级写入中文标题；返回是否真正发生变更（供保存缓存判断） */
     function setZh(slug, zh, src) {
@@ -532,6 +532,26 @@
         saveConfig(config);
     }
     let cache = loadCache(); // slug -> { ja, zh? }
+    // v4.0.22 更换免费中文源：旧 GetAV 中文标题不再作为当前源使用，
+    // 删除其中文值和负缓存，让 JAVD 在下次扫描时重新建立来源可信的缓存。
+    try {
+        let migrated = false;
+        Object.keys(cache).forEach((k) => {
+            const c = cache[k];
+            if (!c) return;
+            if (c.zhSrc === 'getav') {
+                delete c.zh;
+                delete c.zhSrc;
+                delete c.zhAt;
+                migrated = true;
+            }
+            if (c.getavMiss) {
+                delete c.getavMiss;
+                migrated = true;
+            }
+        });
+        if (migrated) saveCache(cache);
+    } catch {}
     // v4.0.5 一次性缓存清洗：早期版本在异常网络下可能把跳转/提示页的文本
     // （如 h1 为 miss.ws 的页面）当作标题入库。规则：ja/zh 必须包含番号本体，
     // 不含即判定为污染数据删除（番号键为小写，标题里的番号大小写不敏感比较）
@@ -673,12 +693,12 @@
         });
     }
 
-    /* ---------------- GetAV 中文标题源（优先级最高：精校中字） ----------------
-     * GetAV 视频页（/zh/videos/<番号>）服务端直出完整中文标题，
-     * 油猴 GM_xhr 跨站 GET 即可拿到，无需 iframe、无 Cloudflare。
-     * 未收录的番号记负缓存 getavMiss（7 天），避免每次翻页重复查询。 */
+    /* ---------------- JAVD 中文标题源（优先级最高：精校中字） ----------------
+     * JAVD 中文站详情页（/v/<番号>）服务端直出中文标题，
+     * 油猴 GM_xhr 跨站 GET 即可拿到。未收录的番号记负缓存 javdMiss，
+     * 避免每次翻页重复查询。 */
 
-    const MISS_TTL = 24 * 3600 * 1000; // 负缓存 24 小时（新片可能随后收录，原 7 天太久——GetAV 收录后用户长时间看不到精校标题）；GetAV/Jable 两源共用
+    const MISS_TTL = 24 * 3600 * 1000; // 负缓存 24 小时；JAVD/Jable 两源共用
 
     /** 跨站 GET，返回 { status, text }；网络层失败 reject */
     function httpGet(url) {
@@ -698,50 +718,52 @@
         });
     }
 
-    /** 从 GetAV 视频页 HTML 解析中文标题；404 / 未收录返回 null */
-    function parseGetavTitle(html, slug) {
+    /** 从 JAVD 视频页 HTML 解析中文标题；404 / 未收录返回 null */
+    function parseJavdTitle(html, slug) {
         if (!html) return null;
         const doc = new DOMParser().parseFromString(html, 'text/html');
-        const h1 = doc.querySelector('h1');
-        if (!h1) return null; // SPA 壳或兜底首页
-        const t = h1.textContent.trim();
+        // 站点结构变动时依次尝试详情标题、OG 标题和页面标题；
+        // 最终仍以「必须包含番号」防止把 Cloudflare/首页文本写入缓存。
+        const candidates = [...doc.querySelectorAll('h1, .video-title, .title, [class*="video-title"], [class*="title"]')]
+            .map((el) => el.textContent.trim())
+            .filter(Boolean);
+        const og = (doc.querySelector('meta[property="og:title"]') || {}).content;
+        const t = (candidates.find((text) => !slug || text.toLowerCase().includes(slug)) || og || '').trim();
         if (!t || t === '404' || /页面未找到/.test(t)) return null;
-        // 异常页面防污染：GetAV 详情页 h1 必含番号本体；不含说明拿到的是
-        // 跳转/提示/劫持页（如某些网络下被劫持到标题为 miss.ws 的页面），
-        // 绝不能入库，否则标题会被替换成垃圾文本
+        // 异常页面防污染：详情标题必须含番号本体。
         if (slug && t.toLowerCase().indexOf(slug) === -1) return null;
         return t;
     }
 
     /**
-     * 按番号查 GetAV 中文标题。命中返回标题文本；未收录返回 null 并写负缓存；
+     * 按番号查 JAVD 中文标题。命中返回标题文本；未收录返回 null 并写负缓存；
      * 网络失败 / 异常页面返回 null 但【不写】负缓存（下次重试）。
      */
-    async function fetchGetavTitle(slug) {
+    async function fetchJavdTitle(slug) {
         const hit = cache[slug];
-        if (hit && hit.getavMiss && Date.now() - hit.getavMiss < MISS_TTL) return null;
+        if (hit && hit.javdMiss && Date.now() - hit.javdMiss < MISS_TTL) return null;
         try {
-            const r = await httpGet('https://getav.net/zh/videos/' + encodeURIComponent(slug));
+            const r = await httpGet('https://cn.javd.me/v/' + encodeURIComponent(slug));
             if (r.status < 200 || r.status >= 300) {
                 // 404 = 确认未收录，写负缓存；5xx 等异常不写，下次重试
                 if (r.status === 404) {
-                    cache[slug] = Object.assign(cache[slug] || {}, { getavMiss: Date.now() });
+                    cache[slug] = Object.assign(cache[slug] || {}, { javdMiss: Date.now() });
                 }
                 return null;
             }
-            const title = parseGetavTitle(r.text, slug);
+            const title = parseJavdTitle(r.text, slug);
             // 200 但解析不出合规标题 = 异常页面（劫持/跳转/软错误），
             // 不是「确认未收录」——绝不写负缓存，否则一次网络波动把番号打入冷宫 7 天
             return title || null;
         } catch (e) {
-            log('GetAV 查询失败 ' + slug, e);
+            log('JAVD 查询失败 ' + slug, e);
             return null;
         }
     }
 
     /* ---------------- Jable 官方中文标题源（优先级第二） ----------------
      * Jable 视频页（/videos/<番号小写>/）服务端直出官方繁中标题（h4），
-     * 未收录返回干净的 HTTP 404。与 GetAV 同规则：标题必须含番号本体，
+     * 未收录返回干净的 HTTP 404。与 JAVD 同规则：标题必须含番号本体，
      * 负缓存只认 404，异常页面不写。
      * 注意：Jable 整站挂 Cloudflare，GM_xhr 拿不到 cf_clearance（桌面
      * Tampermonkey 与移动脚本管理器实测均被 403 挑战页拦截）。检测到
@@ -836,27 +858,27 @@
         }
         return missed;
     }
-    const resolveViaGetav = (slugs) => resolveVia(slugs, fetchGetavTitle, 'getav');
+    const resolveViaJavd = (slugs) => resolveVia(slugs, fetchJavdTitle, 'javd');
     const resolveViaJable = (slugs) => resolveVia(slugs, fetchJableTitle, 'jable');
 
-    /* ---------------- GetAV 查询候选（含「来源升级」） ----------------
-     * GetAV 的收录是增长的：昨天 404 的番号今天可能有了精校中字。
-     * 两类番号需要查 GetAV：
+    /* ---------------- JAVD 查询候选（含「来源升级」） ----------------
+     * JAVD 的收录是增长的：昨天 404 的番号今天可能有了精校中字。
+     * 两类番号需要查 JAVD：
      * 1) 尚无中文标题的——常规查询；
      * 2) 只有旧 llm 译文的——「升级查询」：译文超过 UPGRADE_AFTER 且
-     *    近期没查过 GetAV，就重查一次，命中则以精校替换机翻
-     *    （setZh 优先级 getav > llm 自动完成替换）。
+     *    近期没查过 JAVD，就重查一次，命中则以精校替换机翻
+     *    （setZh 优先级 javd > llm 自动完成替换）。
      * 频率天然有界：404 会写 24h 负缓存，升级候选按 3 天节奏复查。 */
     const UPGRADE_AFTER = 3 * 24 * 3600 * 1000;
 
-    function needGetavQuery(slugs) {
+    function needJavdQuery(slugs) {
         const now = Date.now();
         return slugs.filter((s) => {
             const hit = cache[s];
             if (!hit || !hit.zh) return true;                                  // 无中文：常规查询
-            if (hit.zhSrc !== 'llm') return false;                             // 已是精校/官方中文
+            if (hit.zhSrc === 'javd' || hit.zhSrc === 'jable') return false;   // 已是当前精校/官方中文
             if (hit.zhAt && now - hit.zhAt < UPGRADE_AFTER) return false;      // 译文还新鲜
-            if (hit.getavMiss && now - hit.getavMiss < UPGRADE_AFTER) return false; // 近期确认未收录
+            if (hit.javdMiss && now - hit.javdMiss < UPGRADE_AFTER) return false; // 近期确认未收录
             return true;                                                       // 旧机翻：尝试升级
         });
     }
@@ -1142,7 +1164,7 @@
             if (lang === 'cn') {
                 ensureSubBadge(box);
                 // 只写 zh 不碰 ja——ja 保留站点原文供翻译/语言判定；
-                // setZh 按优先级写入，不会覆盖已有的 GetAV 精校中文
+                // setZh 按优先级写入，不会覆盖已有的 JAVD 精校中文
                 if (setZh(slug, orig, 'jable')) changed = true;
             } else if (lang === 'ja') {
                 cache[slug] = Object.assign(hit || {}, { ja: orig });
@@ -1165,7 +1187,7 @@
         const slugs = [...new Set(cards.map((c) => c.slug))];
         // 先算好有没有网络工作要做：全部命中缓存时直接早退——
         // Observer 高频回调（我们自己改 DOM 也会触发）不能让按钮状态空闪
-        const wantZh = needGetavQuery(slugs);
+        const wantZh = needJavdQuery(slugs);
         const needLlm = () => config.apiKey
             ? slugs.filter((s) => cache[s] && cache[s].ja && !cache[s].zh)
             : [];
@@ -1173,9 +1195,9 @@
         running = true;
         setButtonState('translating');
         try {
-            // 第 2 层：GetAV 精校中文（无需 Key，命中即显示；含旧机翻的来源升级重查）
-            if (wantZh.length) await resolveViaGetav(wantZh);
-            // 第 3 层：剩余日文原标题走大模型（需要 Key；GetAV 命中的已被 needLlm 重算排除）
+            // 第 2 层：JAVD 精校中文（无需 Key，命中即显示；含旧机翻的来源升级重查）
+            if (wantZh.length) await resolveViaJavd(wantZh);
+            // 第 3 层：剩余日文原标题走大模型（需要 Key；JAVD 命中的已被 needLlm 重算排除）
             const todo = needLlm();
             for (let i = 0; i < todo.length; i += 20) {
                 const chunk = todo.slice(i, i + 20);
@@ -1247,7 +1269,7 @@
     }
 
     /**
-     * GetAV 无需网络的 DOM 处理：中文标题（GetAV 精校，质量最高的来源）
+     * GetAV 无需网络的 DOM 处理：中文标题（GetAV 页面原文，质量最高的来源）
      * 直接入缓存供三站复用；个别日文原标题记入 ja 等大模型兜底。
      * 与 Jable 同理：只有脚本未动过 DOM（缓存无 zh）时才信任 DOM 语言判定。
      */
@@ -1378,9 +1400,9 @@
         applyCached(cards);
         const allSlugs = [...new Set(cards.map((c) => c.slug))];
         const needJa = allSlugs.filter((s) => !cache[s] || !cache[s].ja);
-        // 中文标题链：GetAV 精校中文免费、无需 Key，缺中文的番号就是有工作可做
-        // （含「来源升级」：超过 3 天的 llm 旧译文会重查 GetAV，命中以精校替换机翻）
-        const needZh = needGetavQuery(allSlugs);
+        // 中文标题链：JAVD 精校中文免费、无需 Key，缺中文的番号就是有工作可做
+        // （含「来源升级」：超过 3 天的 llm 旧译文会重查 JAVD，命中以精校替换机翻）
+        const needZh = needJavdQuery(allSlugs);
         // 日文抓取（iframe + CF 验证，成本高）只服务大模型翻译：没填 Key 抓到也没人翻，
         // 直接跳过，只跑免费中文源
         const jaWanted = !!config.apiKey;
@@ -1405,12 +1427,12 @@
             }
         };
         try {
-            // 第 2 层：GetAV 精校中文源（免费；无需 Key；命中即缓存并显示）
-            if (needZh.length) await resolveViaGetav(needZh);
-            // 第 2.5 层：Jable 官方中文源——GetAV 未收录的新片常能在 Jable 找到官方繁中
+            // 第 2 层：JAVD 精校中文源（免费；无需 Key；命中即缓存并显示）
+            if (needZh.length) await resolveViaJavd(needZh);
+            // 第 2.5 层：Jable 官方中文源——JAVD 未收录的新片常能在 Jable 找到官方繁中
             const stillNeedZh = needZh.filter((s) => !cache[s] || !cache[s].zh);
             if (stillNeedZh.length) await resolveViaJable(stillNeedZh);
-            // GetAV/Jable 命中的番号已有可靠中文，连日文原文都不再需要——
+            // JAVD/Jable 命中的番号已有可靠中文，连日文原文都不再需要——
             // 日文抓取和大模型只为「两个中文源都没收录」的番号兜底
             const needJa2 = needJa.filter((s) => !cache[s] || !cache[s].zh);
             if (needJa2.length && jaWanted) {
@@ -1519,7 +1541,7 @@
         panel.innerHTML =
             '<div style="font-weight:600;margin-bottom:8px">' + ({ jable: 'Jable 标题增强设置', getav: 'GetAV 增强设置' }[SITE] || 'MissAV 综合增强设置') + '</div>' +
             '<button id="mve-save" style="width:100%;padding:6px;border:none;border-radius:6px;background:#3b7cd7;color:#fff;cursor:pointer">保存并应用</button>' +
-            '<div style="margin:6px 0 2px;font-size:11px;color:#8b93a5">中文标题：缓存 → GetAV 精校 → Jable 繁中 → 大模型兜底（前两级无需 Key）</div>' +
+            '<div style="margin:6px 0 2px;font-size:11px;color:#8b93a5">中文标题：缓存 → JAVD 精校 → Jable 繁中 → 大模型兜底（前两级无需 Key）</div>' +
             '<details open style="border-top:1px solid #2e3440;margin-top:4px">' +
             '<summary style="' + secStyle + '">大模型与 Key</summary>' +
             '<div style="' + boxStyle + '">' +
@@ -1608,7 +1630,7 @@
             btn.style.display = config.showButton ? '' : 'none';
             saveConfig(config);
             lastError = null;
-            msg('已保存' + (!config.apiKey ? '（未填 Key：GetAV 精校 / Jable 中文照常使用，未收录的保持原标题）' : ''));
+            msg('已保存' + (!config.apiKey ? '（未填 Key：JAVD 精校 / Jable 中文照常使用，未收录的保持原标题）' : ''));
             togglePanel();
             enhanceTitles();
         });
@@ -1625,14 +1647,14 @@
             importFile.value = ''; // 允许重复导入同一个文件
         });
         panel.querySelector('#mve-diag').addEventListener('click', runDiagnostics);
-        // 「重查未收录」：清掉 GetAV/Jable 的负缓存标记并立即重跑标题链。
+        // 「重查未收录」：清掉 JAVD/Jable 的负缓存标记并立即重跑标题链。
         // 适用场景：明知某站刚收录了新片（负缓存 24h 内），不想等自动过期
         panel.querySelector('#mve-retry').addEventListener('click', () => {
             let n = 0;
             Object.keys(cache).forEach((k) => {
                 const c = cache[k];
                 if (!c) return;
-                if (c.getavMiss) { delete c.getavMiss; n++; }
+                if (c.javdMiss) { delete c.javdMiss; n++; }
                 if (c.jableMiss) { delete c.jableMiss; n++; }
             });
             saveCache(cache);
@@ -1651,7 +1673,7 @@
         const add = (k, v) => { lines.push(k + '：' + v); out.textContent = lines.join('\n'); };
         const ver = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '?';
         add('脚本版本', ver + '（站点：' + SITE + '）');
-        add('GM_xhr', typeof GM_xmlhttpRequest === 'function' ? '✓ 存在' : '✗ 不存在（GetAV 跨站查询无法工作）');
+        add('GM_xhr', typeof GM_xmlhttpRequest === 'function' ? '✓ 存在' : '✗ 不存在（JAVD 跨站查询无法工作）');
         add('GM 存储', hasGM ? '✓ 存在' : '✗ 不存在（用 localStorage 兜底，缓存不跨站共享）');
         if (SITE === 'getav') {
             add('React 水合', !hydrationInfo.checked ? '等待中（门控尚未放行）'
@@ -1665,30 +1687,30 @@
         try {
             const cardsNow = collectCards();
             const uniq = [...new Set(cardsNow.map((c) => c.slug))];
-            const src = { getav: 0, jable: 0, llm: 0 };
+            const src = { javd: 0, jable: 0, llm: 0 };
             uniq.forEach((s) => {
                 const h = cache[s];
                 if (h && h.zh) src[h.zhSrc && src[h.zhSrc] !== undefined ? h.zhSrc : 'llm']++;
             });
             add('页面卡片', cardsNow.length + ' 个标题链接 / ' + uniq.length + ' 个番号');
-            add('缓存中文', 'getav ' + src.getav + ' / jable ' + src.jable + ' / llm ' + src.llm);
+            add('缓存中文', 'javd ' + src.javd + ' / jable ' + src.jable + ' / llm ' + src.llm);
         } catch (e) {
             add('页面卡片', '识别失败：' + (e && e.message));
         }
         const keys = Object.keys(cache);
         const zhN = keys.filter((k) => cache[k] && cache[k].zh).length;
-        const missN = keys.filter((k) => cache[k] && cache[k].getavMiss).length;
-        add('缓存', keys.length + ' 条（含中文 ' + zhN + '，GetAV 负缓存 ' + missN + '）');
+        const missN = keys.filter((k) => cache[k] && cache[k].javdMiss).length;
+        add('缓存', keys.length + ' 条（含中文 ' + zhN + '，JAVD 负缓存 ' + missN + '）');
         if (SITE !== 'getav' && typeof GM_xmlhttpRequest === 'function') {
-            add('GetAV 查询', '测试中…');
+            add('JAVD 查询', '测试中…');
             try {
-                const r = await httpGet('https://getav.net/zh/videos/jur-857');
-                const t = parseGetavTitle(r.text, 'jur-857');
-                lines[lines.length - 1] = 'GetAV 查询：HTTP ' + r.status +
+                const r = await httpGet('https://cn.javd.me/v/jur-857');
+                const t = parseJavdTitle(r.text, 'jur-857');
+                lines[lines.length - 1] = 'JAVD 查询：HTTP ' + r.status +
                     (t ? '，✓ 标题：' + t.slice(0, 40)
                        : '，但解析不到合规标题（异常页面，前 100 字：' + r.text.slice(0, 100).replace(/\s+/g, ' ') + '）');
             } catch (e) {
-                lines[lines.length - 1] = 'GetAV 查询：✗ 失败——' + e.message;
+                lines[lines.length - 1] = 'JAVD 查询：✗ 失败——' + e.message;
             }
             out.textContent = lines.join('\n');
         }
