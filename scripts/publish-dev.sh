@@ -33,9 +33,11 @@ cd "$(dirname "$0")/.."
 node --check "$SCRIPT_FILE"
 ok "语法检查通过（node --check）"
 
-if [ -f "/Users/Alan/.agents/skills/scriptcat-userscript/scripts/check.mjs" ]; then
-    node /Users/Alan/.agents/skills/scriptcat-userscript/scripts/check.mjs "$SCRIPT_FILE"
+if [ -n "${SCRIPTCAT_CHECKER:-}" ] && [ -f "$SCRIPTCAT_CHECKER" ]; then
+    node "$SCRIPTCAT_CHECKER" "$SCRIPT_FILE"
     ok "ScriptCat 静态检查通过"
+else
+    warn "未设置 SCRIPTCAT_CHECKER，跳过 ScriptCat 静态检查"
 fi
 
 version=$(grep -m1 '^// @version' "$SCRIPT_FILE" | sed -E 's|^// *@version +||' | tr -d '[:space:]')
