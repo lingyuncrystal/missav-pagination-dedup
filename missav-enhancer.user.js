@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.2
+// @version      4.0.30-dev.3
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -22,6 +22,7 @@
 // @grant        GM_getValue
 // @grant        GM_xmlhttpRequest
 // @grant        GM_registerMenuCommand
+// @grant        GM_openInTab
 // @connect      getav.net
 // @connect      jable.tv
 // @connect      api.moonshot.cn
@@ -736,6 +737,27 @@
         } catch (e) {
             log('GetAV 查询失败 ' + slug, e);
             return null;
+        }
+    }
+
+    /** 手机研发版备用：在 GetAV 顶层页面由脚本自身读取标题并写入共享缓存。 */
+    function openGetavVerifyPage() {
+        const card = collectCards().find((c) => c && c.slug && /\d/.test(c.slug));
+        const slug = card ? card.slug : slugFromHref(location.href);
+        if (!slug || !/\d/.test(slug)) {
+            msg('当前页面没有识别到有效番号，请进入具体影片详情页或列表页后再试');
+            return;
+        }
+        const url = 'https://getav.net/zh/videos/' + encodeURIComponent(slug);
+        let tab = null;
+        if (typeof GM_openInTab === 'function') {
+            try { tab = GM_openInTab(url, { active: true, insert: true, setParent: true }); } catch (e) { log('GM_openInTab 失败', e); }
+        }
+        if (!tab) tab = window.open(url, '_blank');
+        if (tab) msg('已打开 GetAV 验证页；页面显示中文标题后返回，再点「重查未收录」');
+        else {
+            msg('新标签页被拦截，正在当前页打开 GetAV；完成后用浏览器返回原页面');
+            location.href = url;
         }
     }
 
@@ -1566,6 +1588,7 @@
             '<button id="mve-retry" style="flex:1;' + ghostBtn + '">重查未收录</button>' +
             '<button id="mve-diag" style="flex:1;' + ghostBtn + '">诊断</button>' +
             '</div>' +
+            '<button id="mve-getav-verify" style="width:100%;margin-top:8px;' + ghostBtn + '">打开 GetAV 验证页（研发版）</button>' +
             '<pre id="mve-diag-out" style="display:none;margin-top:6px;padding:8px;border-radius:6px;background:#12151d;color:#9db8dd;font-size:11px;white-space:pre-wrap;word-break:break-all;max-height:180px;overflow:auto"></pre>' +
             '</div>' +
             '</details>' +
@@ -1578,6 +1601,10 @@
                 const label = panel.querySelector(sel).closest('label');
                 if (label) label.style.display = 'none';
             });
+        }
+        if (SITE === 'getav') {
+            const verify = panel.querySelector('#mve-getav-verify');
+            if (verify) verify.style.display = 'none';
         }
 
         // 切换服务商：更新 Key 申请提示；选「自定义」才展开地址/模型手填区
@@ -1625,6 +1652,7 @@
             importFile.value = ''; // 允许重复导入同一个文件
         });
         panel.querySelector('#mve-diag').addEventListener('click', runDiagnostics);
+        panel.querySelector('#mve-getav-verify').addEventListener('click', openGetavVerifyPage);
         // 「重查未收录」：清掉 GetAV/Jable 的负缓存标记并立即重跑标题链。
         // 适用场景：明知某站刚收录了新片（负缓存 24h 内），不想等自动过期
         panel.querySelector('#mve-retry').addEventListener('click', () => {
@@ -1688,7 +1716,8 @@
                     (t ? '，✓ 标题：' + t.slice(0, 40)
                        : '，但解析不到合规标题（异常页面，前 100 字：' + r.text.slice(0, 100).replace(/\s+/g, ' ') + '）');
             } catch (e) {
-                lines[lines.length - 1] = 'GetAV 查询：✗ 失败——' + e.message;
+                lines[lines.length - 1] = 'GetAV 查询：✗ 失败——' + e.message +
+                    '（研发版可点「打开 GetAV 验证页」，由手机顶层页面读取标题）';
             }
             out.textContent = lines.join('\n');
         }
