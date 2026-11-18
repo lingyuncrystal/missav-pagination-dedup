@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.3
-// @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
+// @version      4.0.30-dev.4
+// @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Jable 繁中 → Manko → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
 // @icon         https://missav.ws/favicon.ico
@@ -25,6 +25,9 @@
 // @grant        GM_openInTab
 // @connect      getav.net
 // @connect      jable.tv
+// @connect      manko.fun
+// @connect      healertanker.com
+// @connect      alpharomeo.shop
 // @connect      api.moonshot.cn
 // @connect      api.deepseek.com
 // @connect      api.openai.com
@@ -478,10 +481,10 @@
     }
 
     /* ---------------- 中文标题来源优先级 ----------------
-     * getav（精校中字，最准）> jable（官方繁中）> llm（大模型译文）。
+     * getav（精校中字，最准）> jable（官方繁中）> manko（中文资料）> llm（大模型译文）。
      * 高优先级来源可以覆盖低优先级；低优先级永远不能覆盖高优先级。
      * 旧缓存条目没有 zhSrc 字段：有 zh 即视为 llm 级（1）。 */
-    const ZH_SRC_PRIORITY = { getav: 3, jable: 2, llm: 1 };
+    const ZH_SRC_PRIORITY = { getav: 4, jable: 3, manko: 2, llm: 1 };
 
     /** 按优先级写入中文标题；返回是否真正发生变更（供保存缓存判断） */
     function setZh(slug, zh, src) {
@@ -565,8 +568,8 @@
         const storedVer = hasGM ? GM_getValue(verKey, 0) : Number(localStorage.getItem('mve-prompt-ver') || 0);
         if (storedVer !== PROMPT_VERSION) {
             Object.keys(cache).forEach((k) => {
-                // Jable 官方中文（zhSrc:'jable'）不是大模型产物，不随提示词升级作废
-                if (cache[k] && cache[k].zhSrc !== 'jable') delete cache[k].zh;
+                // 免费来源不是大模型产物，不随提示词升级作废
+                if (cache[k] && !['getav', 'jable', 'manko'].includes(cache[k].zhSrc)) delete cache[k].zh;
             });
             saveCache(cache);
             if (hasGM) GM_setValue(verKey, PROMPT_VERSION);
@@ -840,6 +843,89 @@
         }
     }
 
+    /* ---------------- Manko 中文资料源（研发版第三源） ----------------
+     * manko.fun 页面把检索 API 代理到公开的后端域名，返回轻量字节编码的 JSON。
+     * 这里先检索番号拿到内部 _id，再读取详情；不依赖 Cloudflare 页面 DOM，且只把
+     * 详情中的 zh 标题/简介写入缓存。网络异常不写负缓存，404/空结果才记 mankoMiss。 */
+    const MANKO_MISS_TTL = MISS_TTL;
+    const MANKO_API_HOSTS = ['healertanker.com', 'alpharomeo.shop'];
+    const MANKO_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{|}~"';
+
+    function decodeMankoPayload(encoded) {
+        const bytes = [];
+        let acc = 0, bits = 0, pending = -1;
+        for (const ch of String(encoded || '')) {
+            const value = MANKO_ALPHABET.indexOf(ch);
+            if (value < 0) continue;
+            if (pending < 0) {
+                pending = value;
+            } else {
+                acc |= (pending + 91 * value) << bits;
+                bits += (8191 & (pending + 91 * value)) > 88 ? 13 : 14;
+                do {
+                    bytes.push(255 & acc);
+                    acc >>= 8;
+                    bits -= 8;
+                } while (bits > 7);
+                pending = -1;
+            }
+        }
+        if (pending > -1) bytes.push(255 & (acc | pending << bits));
+        return new TextDecoder().decode(new Uint8Array(bytes));
+    }
+
+    async function fetchMankoApi(path) {
+        let lastError = null;
+        for (const host of MANKO_API_HOSTS) {
+            try {
+                const r = await httpGet('https://' + host + '/' + path);
+                if (r.status < 200 || r.status >= 300) {
+                    lastError = new Error('HTTP ' + r.status);
+                    continue;
+                }
+                const outer = JSON.parse(r.text || '{}');
+                return JSON.parse(decodeMankoPayload(outer.data));
+            } catch (e) {
+                lastError = e;
+            }
+        }
+        throw lastError || new Error('Manko 请求失败');
+    }
+
+    function pickMankoChineseTitle(detail, slug) {
+        const names = Array.isArray(detail && detail.title_display_name) ? detail.title_display_name : [];
+        const zhName = names.find((x) => /^zh(?:-|$)/i.test(String(x && x.language || '')) && x.title);
+        const zhOverview = Array.isArray(detail && detail.discription)
+            ? detail.discription.find((x) => /^zh(?:-|$)/i.test(String(x && x.language || '')) && x.overview)
+            : null;
+        const title = String((zhName && zhName.title) || (zhOverview && zhOverview.overview) || '').trim();
+        if (!title || title.length > 240 || /just a moment|cloudflare|页面未找到/i.test(title)) return null;
+        // 详情 API 已按 _id 关联番号；仅拒绝明显的错误占位，不强制中文简介包含番号。
+        if (slug && title.toLowerCase() === slug.toLowerCase()) return null;
+        return title;
+    }
+
+    async function fetchMankoTitle(slug) {
+        const hit = cache[slug];
+        if (hit && hit.mankoMiss && Date.now() - hit.mankoMiss < MANKO_MISS_TTL) return null;
+        try {
+            const list = await fetchMankoApi('swx/movie/search?keyword=' + encodeURIComponent(slug) + '&size=24&page=1');
+            const rows = Array.isArray(list) ? list : (Array.isArray(list && list.data) ? list.data : []);
+            const row = rows.find((x) => String(x && (x.title || x.title_display_name && x.title_display_name[0] && x.title_display_name[0].title) || '').toLowerCase() === slug.toLowerCase()) || rows[0];
+            if (!row || !row._id) {
+                cache[slug] = Object.assign(cache[slug] || {}, { mankoMiss: Date.now() });
+                return null;
+            }
+            const detail = await fetchMankoApi('swx/movie/detail/' + encodeURIComponent(row._id));
+            const title = pickMankoChineseTitle(detail, slug);
+            if (!title) cache[slug] = Object.assign(cache[slug] || {}, { mankoMiss: Date.now() });
+            return title;
+        } catch (e) {
+            log('Manko 查询失败 ' + slug, e);
+            return null;
+        }
+    }
+
     /**
      * 批量解析：批量查 GetAV（并发 ≤2），命中的按来源优先级写缓存并即时回写页面。
      * 返回未命中的番号数组，交给下一层。
@@ -860,6 +946,7 @@
     }
     const resolveViaGetav = (slugs) => resolveVia(slugs, fetchGetavTitle, 'getav');
     const resolveViaJable = (slugs) => resolveVia(slugs, fetchJableTitle, 'jable');
+    const resolveViaManko = (slugs) => resolveVia(slugs, fetchMankoTitle, 'manko');
 
     /* ---------------- GetAV 查询候选（含「来源升级」） ----------------
      * GetAV 的收录是增长的：昨天 404 的番号今天可能有了精校中字。
@@ -1197,7 +1284,10 @@
         try {
             // 第 2 层：GetAV 精校中文（无需 Key，命中即显示；含旧机翻的来源升级重查）
             if (wantZh.length) await resolveViaGetav(wantZh);
-            // 第 3 层：剩余日文原标题走大模型（需要 Key；GetAV 命中的已被 needLlm 重算排除）
+            // 第 3 层：Manko 中文资料（GetAV 未收录时补查）
+            const stillNeedManko = wantZh.filter((s) => !cache[s] || !cache[s].zh);
+            if (stillNeedManko.length) await resolveViaManko(stillNeedManko);
+            // 第 4 层：剩余日文原标题走大模型（需要 Key）
             const todo = needLlm();
             for (let i = 0; i < todo.length; i += 20) {
                 const chunk = todo.slice(i, i + 20);
@@ -1311,8 +1401,10 @@
         running = true;
         setButtonState('translating');
         try {
-            // GetAV 上的日文原标题：先查 Jable 官方中文（无需 Key），再轮到大模型
+            // GetAV 上的日文原标题：先查 Jable，再查 Manko，最后轮到大模型
             if (wantZh.length) await resolveViaJable(wantZh);
+            const stillNeedManko = wantZh.filter((s) => !cache[s] || !cache[s].zh);
+            if (stillNeedManko.length) await resolveViaManko(stillNeedManko);
             const todo = needLlm();
             for (let i = 0; i < todo.length; i += 20) {
                 const chunk = todo.slice(i, i + 20);
@@ -1432,6 +1524,9 @@
             // 第 2.5 层：Jable 官方中文源——GetAV 未收录的新片常能在 Jable 找到官方繁中
             const stillNeedZh = needZh.filter((s) => !cache[s] || !cache[s].zh);
             if (stillNeedZh.length) await resolveViaJable(stillNeedZh);
+            // 第 2.75 层：Manko 中文资料源——再补一次免费来源，最后才进入日文/大模型兜底
+            const stillNeedManko = stillNeedZh.filter((s) => !cache[s] || !cache[s].zh);
+            if (stillNeedManko.length) await resolveViaManko(stillNeedManko);
             // GetAV/Jable 命中的番号已有可靠中文，连日文原文都不再需要——
             // 日文抓取和大模型只为「两个中文源都没收录」的番号兜底
             const needJa2 = needJa.filter((s) => !cache[s] || !cache[s].zh);
@@ -1541,7 +1636,7 @@
         panel.innerHTML =
             '<div style="font-weight:600;margin-bottom:8px">' + ({ jable: 'Jable 标题增强设置', getav: 'GetAV 增强设置' }[SITE] || 'MissAV 综合增强设置') + '</div>' +
             '<button id="mve-save" style="width:100%;padding:6px;border:none;border-radius:6px;background:#3b7cd7;color:#fff;cursor:pointer">保存并应用</button>' +
-            '<div style="margin:6px 0 2px;font-size:11px;color:#8b93a5">中文标题：缓存 → GetAV 精校 → Jable 繁中 → 大模型兜底（前两级无需 Key）</div>' +
+            '<div style="margin:6px 0 2px;font-size:11px;color:#8b93a5">中文标题：缓存 → GetAV 精校 → Jable 繁中 → Manko → 大模型兜底（前四级无需 Key）</div>' +
             '<details open style="border-top:1px solid #2e3440;margin-top:4px">' +
             '<summary style="' + secStyle + '">大模型与 Key</summary>' +
             '<div style="' + boxStyle + '">' +
@@ -1653,7 +1748,7 @@
         });
         panel.querySelector('#mve-diag').addEventListener('click', runDiagnostics);
         panel.querySelector('#mve-getav-verify').addEventListener('click', openGetavVerifyPage);
-        // 「重查未收录」：清掉 GetAV/Jable 的负缓存标记并立即重跑标题链。
+        // 「重查未收录」：清掉 GetAV/Jable/Manko 的负缓存标记并立即重跑标题链。
         // 适用场景：明知某站刚收录了新片（负缓存 24h 内），不想等自动过期
         panel.querySelector('#mve-retry').addEventListener('click', () => {
             let n = 0;
@@ -1662,6 +1757,7 @@
                 if (!c) return;
                 if (c.getavMiss) { delete c.getavMiss; n++; }
                 if (c.jableMiss) { delete c.jableMiss; n++; }
+                if (c.mankoMiss) { delete c.mankoMiss; n++; }
             });
             saveCache(cache);
             msg('已清除 ' + n + ' 条「未收录」标记，正在重新查询…');
@@ -1693,20 +1789,21 @@
         try {
             const cardsNow = collectCards();
             const uniq = [...new Set(cardsNow.map((c) => c.slug))];
-            const src = { getav: 0, jable: 0, llm: 0 };
+            const src = { getav: 0, jable: 0, manko: 0, llm: 0 };
             uniq.forEach((s) => {
                 const h = cache[s];
                 if (h && h.zh) src[h.zhSrc && src[h.zhSrc] !== undefined ? h.zhSrc : 'llm']++;
             });
             add('页面卡片', cardsNow.length + ' 个标题链接 / ' + uniq.length + ' 个番号');
-            add('缓存中文', 'getav ' + src.getav + ' / jable ' + src.jable + ' / llm ' + src.llm);
+            add('缓存中文', 'getav ' + src.getav + ' / jable ' + src.jable + ' / manko ' + src.manko + ' / llm ' + src.llm);
         } catch (e) {
             add('页面卡片', '识别失败：' + (e && e.message));
         }
         const keys = Object.keys(cache);
         const zhN = keys.filter((k) => cache[k] && cache[k].zh).length;
         const missN = keys.filter((k) => cache[k] && cache[k].getavMiss).length;
-        add('缓存', keys.length + ' 条（含中文 ' + zhN + '，GetAV 负缓存 ' + missN + '）');
+        const mankoMissN = keys.filter((k) => cache[k] && cache[k].mankoMiss).length;
+        add('缓存', keys.length + ' 条（含中文 ' + zhN + '，GetAV 负缓存 ' + missN + '，Manko 负缓存 ' + mankoMissN + '）');
         if (SITE !== 'getav' && typeof GM_xmlhttpRequest === 'function') {
             add('GetAV 查询', '测试中…');
             try {
