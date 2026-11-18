@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      4.0.26
+// @version      4.0.27
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → JAVD 精校中字 → Jable 官方繁中 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -803,7 +803,7 @@
     }
 
     function initJavdManualPage() {
-        const slug = slugFromHref(location.href);
+        const slug = javdSlugFromLocation();
         if (!slug) return;
         const started = Date.now();
         const poll = setInterval(() => {
@@ -1598,6 +1598,14 @@
         return !!slug && /[a-z]{2,}[a-z0-9]*[-_][a-z0-9]*\d/i.test(slug);
     }
 
+    function javdSlugFromLocation() {
+        const m = location.pathname.match(/\/movie\/[^/]+\/([^/]+)/i);
+        const movieSlug = m ? decodeURIComponent(m[1]).toLowerCase() : null;
+        if (isLikelyVideoSlug(movieSlug)) return movieSlug;
+        const last = slugFromHref(location.href);
+        return isLikelyVideoSlug(last) ? last : null;
+    }
+
     function openJavdVerifyPage() {
         const card = collectCards().find((c) => c && isLikelyVideoSlug(c.slug));
         const pageSlug = slugFromHref(location.href);
@@ -1606,10 +1614,10 @@
             msg('当前页面没有识别到有效番号，请进入具体影片详情页后再试');
             return;
         }
-        const url = 'https://cn.javd.me/v/' + encodeURIComponent(slug);
+        const url = 'https://cn.javd.me/search?q=' + encodeURIComponent(slug);
         const tab = window.open(url, '_blank');
         if (tab) {
-            msg('已打开 JAVD 验证页：完成验证后返回此页，再点「重查未收录」');
+            msg('已打开 JAVD 搜索页：点进对应 /movie/ 详情页并完成验证，返回后再点「重查未收录」');
         } else {
             msg('手机浏览器拦截了新标签页，请允许弹窗后重试');
         }
