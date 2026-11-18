@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/
-// @version      4.0.23
+// @version      4.0.24
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → JAVD 精校中字 → Jable 官方繁中 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -1764,9 +1764,11 @@
         }
         // 当前页卡片识别情况：排查「首页/某类页面标题不替换」时一眼看出是没识别到卡片，
         // 还是识别到了但两个中文源都没收录
+        let diagnosticSlug = 'jur-857';
         try {
             const cardsNow = collectCards();
             const uniq = [...new Set(cardsNow.map((c) => c.slug))];
+            if (uniq[0]) diagnosticSlug = uniq[0];
             const src = { javd: 0, jable: 0, llm: 0 };
             uniq.forEach((s) => {
                 const h = cache[s];
@@ -1781,16 +1783,13 @@
         const zhN = keys.filter((k) => cache[k] && cache[k].zh).length;
         const missN = keys.filter((k) => cache[k] && cache[k].javdMiss).length;
         add('缓存', keys.length + ' 条（含中文 ' + zhN + '，JAVD 负缓存 ' + missN + '）');
-        if (SITE !== 'getav' && typeof GM_xmlhttpRequest === 'function') {
-            add('JAVD 查询', '测试中…');
+        if (SITE !== 'getav' && SITE !== 'javd') {
+            add('JAVD 浏览器桥接', '测试中（番号 ' + diagnosticSlug + '）…');
             try {
-                const r = await httpGet('https://cn.javd.me/v/jur-857');
-                const t = parseJavdTitle(r.text, 'jur-857');
-                lines[lines.length - 1] = 'JAVD 查询：HTTP ' + r.status +
-                    (t ? '，✓ 标题：' + t.slice(0, 40)
-                       : '，但解析不到合规标题（异常页面，前 100 字：' + r.text.slice(0, 100).replace(/\s+/g, ' ') + '）');
+                const t = await fetchJavdViaBrowser(diagnosticSlug);
+                lines[lines.length - 1] = 'JAVD 浏览器桥接：✓ 标题：' + t.slice(0, 60);
             } catch (e) {
-                lines[lines.length - 1] = 'JAVD 查询：✗ 失败——' + e.message;
+                lines[lines.length - 1] = 'JAVD 浏览器桥接：✗ ' + e.message + '（若页面可手动打开，请确认脚本已更新到 4.0.24）';
             }
             out.textContent = lines.join('\n');
         }
