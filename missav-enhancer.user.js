@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.7
+// @version      4.0.30-dev.8
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Manko → Jable 繁中 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -25,6 +25,7 @@
 // @grant        GM_openInTab
 // @connect      getav.net
 // @connect      jable.tv
+// @connect      7mmtv.sx
 // @connect      manko.fun
 // @connect      healertanker.com
 // @connect      alpharomeo.shop
@@ -694,6 +695,26 @@
             GM_xmlhttpRequest({
                 method: 'GET',
                 url,
+                timeout: 30000,
+                onload: (r) => resolve({ status: r.status, text: r.responseText }),
+                onerror: () => reject(new Error('网络错误')),
+                ontimeout: () => reject(new Error('超时')),
+            });
+        });
+    }
+
+    /** 跨站 POST，供 7mmtv 的番号搜索表单使用 */
+    function httpPost(url, body) {
+        return new Promise((resolve, reject) => {
+            if (typeof GM_xmlhttpRequest !== 'function') {
+                reject(new Error('当前脚本管理器不支持 GM_xmlhttpRequest'));
+                return;
+            }
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url,
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                data: body,
                 timeout: 30000,
                 onload: (r) => resolve({ status: r.status, text: r.responseText }),
                 onerror: () => reject(new Error('网络错误')),
@@ -2305,7 +2326,206 @@
     }
 
     /* ================================================================
-     * 模块八 ui-titles：列表页标题完整显示（Jable / MissAV）
+     * 模块八 film-intro：MissAV 详情页「影片介绍」Tab
+     * 7mmtv 的详情页有中文/英文两套页面：先 POST 搜索中文详情，找不到或无介绍
+     * 时回退英文；文字和图片都从详情 HTML 解析，点击 Tab 前不发请求。
+     * 图片只限制宽度为容器宽度，保持原始比例，不裁剪、不拉伸。
+     * ================================================================ */
+
+    const filmIntroState = { installed: false, loading: false, cache: {} };
+
+    function missavDetailSlug() {
+        const slug = slugFromHref(location.href);
+        return slug && /\d/.test(slug) && document.querySelector('h1') ? slug : '';
+    }
+
+    function parse7mmtvIntro(html, slug) {
+        const doc = new DOMParser().parseFromString(html || '', 'text/html');
+        const heading = doc.querySelector('.fullvideo-title, h1');
+        const headingText = heading ? heading.textContent.trim() : '';
+        if (slug && headingText && headingText.toLowerCase().indexOf(slug.toLowerCase()) === -1) return null;
+        const textNode = doc.querySelector('.video-introduction-images-text');
+        const text = textNode ? textNode.textContent.trim() : '';
+        const images = [];
+        const addImage = (url) => {
+            try {
+                const u = new URL(String(url || ''), 'https://7mmtv.sx');
+                if (u.protocol === 'https:' && !images.includes(u.href)) images.push(u.href);
+            } catch { /* 忽略无效图片地址 */ }
+        };
+        doc.querySelectorAll('#fullvideo_showallcg img').forEach((img) => {
+            addImage(img.getAttribute('data-src') || img.getAttribute('src'));
+        });
+        doc.querySelectorAll('script').forEach((script) => {
+            const source = script.textContent || '';
+            const re = /fullvideo_showallcg_arr\[\d+\]\s*=\s*['"]([^'"]+)['"]/g;
+            let match;
+            while ((match = re.exec(source))) addImage(match[1]);
+        });
+        if (!text && !images.length) return null;
+        return { text, images };
+    }
+
+    async function fetch7mmtvIntro(slug, lang) {
+        const prefix = lang === 'zh' ? 'zh' : 'en';
+        const searchUrl = 'https://7mmtv.sx/' + prefix + '/searchform_search/all/index.html';
+        const body = 'op=search&search_keyword=' + encodeURIComponent(slug) + '&search_type=searchall';
+        const search = await httpPost(searchUrl, body);
+        if (search.status < 200 || search.status >= 300) throw new Error(prefix + ' 搜索 HTTP ' + search.status);
+        const searchDoc = new DOMParser().parseFromString(search.text || '', 'text/html');
+        const needle = slug.toLowerCase();
+        let detailUrl = '';
+        for (const anchor of searchDoc.querySelectorAll('a[href]')) {
+            try {
+                const u = new URL(anchor.href, 'https://7mmtv.sx');
+                const last = decodeURIComponent(u.pathname.split('/').pop() || '').replace(/\.html$/i, '');
+                if (last.toLowerCase() === needle && /_content\//i.test(u.pathname)) {
+                    detailUrl = u.href;
+                    break;
+                }
+            } catch { /* 忽略异常链接 */ }
+        }
+        if (!detailUrl) return null;
+        const detail = await httpGet(detailUrl);
+        if (detail.status < 200 || detail.status >= 300) throw new Error(prefix + ' 详情 HTTP ' + detail.status);
+        const parsed = parse7mmtvIntro(detail.text, slug);
+        return parsed ? Object.assign(parsed, { lang: prefix, url: detailUrl }) : null;
+    }
+
+    async function load7mmtvIntro(slug) {
+        if (filmIntroState.cache[slug]) return filmIntroState.cache[slug];
+        let zhError = null;
+        try {
+            const zh = await fetch7mmtvIntro(slug, 'zh');
+            if (zh) return (filmIntroState.cache[slug] = zh);
+        } catch (e) { zhError = e; }
+        try {
+            const en = await fetch7mmtvIntro(slug, 'en');
+            if (en) return (filmIntroState.cache[slug] = en);
+        } catch (e) {
+            throw new Error('中文/英文详情均请求失败：' + ((e && e.message) || e));
+        }
+        if (zhError) throw new Error('中文详情无影片介绍，英文详情也未找到对应影片');
+        return null;
+    }
+
+    function renderFilmIntro(panel, data) {
+        panel.textContent = '';
+        if (!data) {
+            panel.textContent = '7mmtv 未找到对应的影片介绍。';
+            return;
+        }
+        if (data.text) {
+            const text = document.createElement('div');
+            text.className = 'mve-film-intro-text';
+            text.textContent = data.text;
+            panel.appendChild(text);
+        }
+        if (data.images.length) {
+            const gallery = document.createElement('div');
+            gallery.className = 'mve-film-intro-images';
+            data.images.forEach((url) => {
+                const img = document.createElement('img');
+                img.src = url;
+                img.alt = '影片介绍图片';
+                img.loading = 'lazy';
+                gallery.appendChild(img);
+            });
+            panel.appendChild(gallery);
+        }
+        if (data.url) {
+            const source = document.createElement('a');
+            source.href = data.url;
+            source.target = '_blank';
+            source.rel = 'noopener noreferrer';
+            source.className = 'mve-film-intro-source';
+            source.textContent = '来源：7mmtv.sx（' + (data.lang === 'zh' ? '中文' : '英文') + '详情）';
+            panel.appendChild(source);
+        }
+    }
+
+    function activateFilmIntroTab(tab, panel, tabList, contentRoot) {
+        tabList.querySelectorAll('a,button,[role="tab"]').forEach((el) => {
+            if (el !== tab) {
+                el.setAttribute('aria-selected', 'false');
+                el.classList.remove('active');
+            }
+        });
+        tab.setAttribute('aria-selected', 'true');
+        tab.classList.add('active');
+        contentRoot.querySelectorAll('.tab-pane, [role="tabpanel"]').forEach((pane) => {
+            if (pane !== panel) pane.classList.remove('active', 'show');
+            if (pane !== panel) pane.hidden = true;
+        });
+        panel.hidden = false;
+        panel.classList.add('active', 'show');
+        if (filmIntroState.loading) return;
+        const slug = missavDetailSlug();
+        if (!slug || filmIntroState.cache[slug]) {
+            if (slug) renderFilmIntro(panel, filmIntroState.cache[slug]);
+            return;
+        }
+        filmIntroState.loading = true;
+        panel.textContent = '正在读取 7mmtv 影片介绍…';
+        load7mmtvIntro(slug).then((data) => renderFilmIntro(panel, data)).catch((e) => {
+            panel.textContent = '影片介绍读取失败：' + ((e && e.message) || e);
+        }).finally(() => { filmIntroState.loading = false; });
+    }
+
+    function ensureFilmIntroTab() {
+        if (filmIntroState.installed || !missavDetailSlug()) return filmIntroState.installed;
+        const candidates = [...document.querySelectorAll('a,button,[role="tab"]')].filter((el) => {
+            const text = el.textContent.trim();
+            return text === '详情' || /^详情\s*(页|信息)?$/.test(text) || /^details?$/i.test(text);
+        });
+        const original = candidates[0];
+        if (!original) return false;
+        const tabList = original.closest('[role="tablist"],ul,.nav-tabs,.tabs') || original.parentElement;
+        const contentRoot = document.querySelector('.tab-content') ||
+            original.closest('section,main,article') || document.body;
+        const panel = document.createElement('div');
+        panel.id = 'mve-film-intro-panel';
+        panel.className = 'tab-pane mve-film-intro-panel';
+        panel.hidden = true;
+        const item = original.closest('li');
+        const tab = (item ? item.cloneNode(true) : original.cloneNode(true));
+        tab.querySelectorAll ? tab.querySelectorAll('[id]').forEach((el) => el.removeAttribute('id')) : null;
+        const tabControl = tab.matches && tab.matches('a,button,[role="tab"]') ? tab : tab.querySelector('a,button,[role="tab"]');
+        if (!tabControl) return false;
+        tabControl.textContent = '影片介绍';
+        tabControl.classList.add('mve-film-intro-tab');
+        tabControl.setAttribute('href', '#mve-film-intro-panel');
+        tabControl.setAttribute('role', 'tab');
+        tabControl.setAttribute('aria-selected', 'false');
+        tabControl.addEventListener('click', (event) => {
+            event.preventDefault();
+            activateFilmIntroTab(tabControl, panel, tabList, contentRoot);
+        });
+        tabList.appendChild(tab);
+        contentRoot.appendChild(panel);
+        tabList.addEventListener('click', (event) => {
+            if (!event.target.closest('.mve-film-intro-tab')) panel.hidden = true;
+        });
+        filmIntroState.installed = true;
+        return true;
+    }
+
+    function initFilmIntroTab() {
+        injectStyleOnce('mve-film-intro-style',
+            '.mve-film-intro-panel{padding:12px 0;line-height:1.7;}' +
+            '.mve-film-intro-text{white-space:pre-wrap;margin-bottom:16px;}' +
+            '.mve-film-intro-images img{display:block;width:100%;height:auto;object-fit:contain;margin:0 auto 12px;}' +
+            '.mve-film-intro-source{display:block;margin-top:16px;font-size:12px;opacity:.75;}');
+        if (ensureFilmIntroTab()) return;
+        const observer = new MutationObserver(() => {
+            if (ensureFilmIntroTab()) observer.disconnect();
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+        setTimeout(() => observer.disconnect(), 12000);
+    }
+
+    /* ================================================================
+     * 模块九 ui-titles：列表页标题完整显示（Jable / MissAV）
      * Jable 卡片标题 h6.title、MissAV 卡片标题 .my-2.truncate 都用
      * 单行省略截断，长标题只能看到一半。放开换行即可全量展示：
      * 两站列表容器分别是 flex-wrap / grid，同一排各列默认 stretch
@@ -2334,6 +2554,7 @@
         injectStyleOnce('mve-missav-full-title',
             '.my-2.truncate{white-space:normal !important;overflow:visible !important;' +
             'text-overflow:clip !important;overflow-wrap:break-word;}');
+        initFilmIntroTab();
     }
 
     /* ================================================================
