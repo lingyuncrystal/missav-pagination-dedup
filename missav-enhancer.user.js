@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.18
+// @version      4.0.30-dev.19
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Manko → Jable 繁中 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -1662,8 +1662,8 @@
             'padding:14px;border-radius:10px;' +
             'background:#1f2430;border:1px solid #3b7cd7;color:#d7dee9;font-size:13px;display:none;' +
             'box-shadow:0 4px 20px rgba(0,0,0,.6);';
-        // 面板分四组折叠（<details>）：默认只展开「大模型与 Key」，
-        // 其余按需展开——元素多，手机上一口气铺开会超屏
+        // 面板分四组折叠（<details>）：默认全部收缩，
+        // 用户按需展开，避免手机打开配置页时一口气铺满屏幕
         const secStyle = 'cursor:pointer;padding:7px 0;font-weight:600;color:#cbd5e1;';
         const boxStyle = 'padding:2px 0 4px';
         const inputStyle = 'width:100%;margin-top:2px;padding:5px;border-radius:6px;border:1px solid #4c566a;background:#2e3440;color:#eceff4';
@@ -1672,7 +1672,7 @@
             '<div style="font-weight:600;margin-bottom:8px">' + ({ jable: 'Jable 标题增强设置', getav: 'GetAV 增强设置' }[SITE] || 'MissAV 综合增强设置') + '</div>' +
             '<button id="mve-save" style="width:100%;padding:6px;border:none;border-radius:6px;background:#3b7cd7;color:#fff;cursor:pointer">保存并应用</button>' +
             '<div style="margin:6px 0 2px;font-size:11px;color:#8b93a5">中文标题：缓存 → GetAV 精校 → Manko → Jable 繁中 → 大模型兜底（前四级无需 Key）</div>' +
-            '<details open style="border-top:1px solid #2e3440;margin-top:4px">' +
+            '<details style="border-top:1px solid #2e3440;margin-top:4px">' +
             '<summary style="' + secStyle + '">大模型与 Key</summary>' +
             '<div style="' + boxStyle + '">' +
             '<label style="display:block;margin-bottom:2px">大模型服务<br><select id="mve-provider" style="' + inputStyle + '">' +
