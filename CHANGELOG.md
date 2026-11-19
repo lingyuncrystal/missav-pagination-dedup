@@ -1,5 +1,9 @@
 # Changelog
 
+## [4.0.30-dev.12] - 2026-11-19
+
+- **修复 Alpine 响应式高亮**：改用 `Alpine.evaluate` 设置详情组件的 `currentTab`，不再只修改 DOM；点击「影片介绍」后 Alpine 会同步取消详情 Tab 高亮并隐藏详情内容。
+
 ## [4.0.30-dev.11] - 2026-11-19
 
 - **修复 Alpine 状态未切换**：点击「影片介绍」时同步写入 MissAV 详情组件的 `currentTab = 'film_intro'`，让原「详情」Tab 的动态高亮和详情内容真正关闭；介绍面板继续显示已加载的 7mmtv 文字与图片。
