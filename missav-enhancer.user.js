@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.12
+// @version      4.0.30-dev.13
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Manko → Jable 繁中 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -23,6 +23,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_registerMenuCommand
 // @grant        GM_openInTab
+// @grant        unsafeWindow
 // @connect      getav.net
 // @connect      jable.tv
 // @connect      7mmtv.sx
@@ -2446,8 +2447,10 @@
 
     function activateFilmIntroTab(tab, panel, tabList, contentRoot, detailPanel, detailRoot, detailState) {
         try {
-            if (detailRoot && typeof Alpine !== 'undefined' && typeof Alpine.evaluate === 'function') {
-                Alpine.evaluate(detailRoot, 'currentTab = "film_intro"');
+            const pageAlpine = typeof unsafeWindow !== 'undefined' ? unsafeWindow.Alpine :
+                (typeof Alpine !== 'undefined' ? Alpine : null);
+            if (detailRoot && pageAlpine && typeof pageAlpine.evaluate === 'function') {
+                pageAlpine.evaluate(detailRoot, 'currentTab = "film_intro"');
             } else if (detailState) {
                 detailState.currentTab = 'film_intro';
             }
@@ -2504,8 +2507,10 @@
         );
         let detailState = null;
         try {
-            if (detailRoot && typeof Alpine !== 'undefined' && Alpine.closestDataStack) {
-                detailState = (Alpine.closestDataStack(detailRoot) || [])[0] || null;
+            const pageAlpine = typeof unsafeWindow !== 'undefined' ? unsafeWindow.Alpine :
+                (typeof Alpine !== 'undefined' ? Alpine : null);
+            if (detailRoot && pageAlpine && pageAlpine.closestDataStack) {
+                detailState = (pageAlpine.closestDataStack(detailRoot) || [])[0] || null;
             }
         } catch { /* Alpine 尚未完全初始化时仍可用 DOM 兜底 */ }
         const contentRoot = document.querySelector('.tab-content') ||
