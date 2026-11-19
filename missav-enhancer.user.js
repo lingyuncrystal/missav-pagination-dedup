@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.6
-// @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → Manko → GetAV 精校中字 → Jable 繁中 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
+// @version      4.0.30-dev.7
+// @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Manko → Jable 繁中 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
 // @icon         https://missav.ws/favicon.ico
@@ -414,7 +414,7 @@
     }
 
     /* ================================================================
-     * 模块五 titles：标题修正（中文标题链：缓存 → Manko → GetAV → Jable → 大模型）
+     * 模块五 titles：标题修正（中文标题链：缓存 → GetAV → Manko → Jable → 大模型）
      * 大模型服务商预设见 PROVIDERS：选中即自动填好地址与默认模型，
      * 用户只需粘贴 Key；「自定义」保留手填入口（OpenAI 兼容接口）。
      * Jable 走独立流程：中文原标题封面加「字幕」徽章，日文原标题
@@ -484,7 +484,7 @@
      * manko（中文资料）> getav（精校中字）> jable（官方繁中）> llm（大模型译文）。
      * 高优先级来源可以覆盖低优先级；低优先级永远不能覆盖高优先级。
      * 旧缓存条目没有 zhSrc 字段：有 zh 即视为 llm 级（1）。 */
-    const ZH_SRC_PRIORITY = { manko: 4, getav: 3, jable: 2, llm: 1 };
+    const ZH_SRC_PRIORITY = { getav: 4, manko: 3, jable: 2, llm: 1 };
 
     /** 按优先级写入中文标题；返回是否真正发生变更（供保存缓存判断） */
     function setZh(slug, zh, src) {
@@ -962,7 +962,7 @@
         const now = Date.now();
         return slugs.filter((s) => {
             const hit = cache[s];
-            if (hit && hit.zhSrc === 'manko') return false;
+            if (hit && (hit.zhSrc === 'getav' || hit.zhSrc === 'manko')) return false;
             if (hit && hit.mankoMiss && now - hit.mankoMiss < MISS_TTL) return false;
             return true;
         });
@@ -1273,7 +1273,7 @@
         return cards;
     }
 
-    /** Jable 主流程：原标题就在当前页 DOM，按 Manko → GetAV → 大模型补齐 */
+    /** Jable 主流程：原标题就在当前页 DOM，按 GetAV → Manko → 大模型补齐 */
     async function enhanceJableTitles() {
         if (running) {
             rerunAfter = true;
@@ -1284,8 +1284,8 @@
         const slugs = [...new Set(cards.map((c) => c.slug))];
         // 先算好有没有网络工作要做：全部命中缓存时直接早退——
         // Observer 高频回调（我们自己改 DOM 也会触发）不能让按钮状态空闪
-        const wantManko = needMankoQuery(slugs);
         const wantZh = needGetavQuery(slugs);
+        const wantManko = needMankoQuery(slugs);
         const needLlm = () => config.apiKey
             ? slugs.filter((s) => cache[s] && cache[s].ja && !cache[s].zh)
             : [];
@@ -1293,11 +1293,11 @@
         running = true;
         setButtonState('translating');
         try {
-            // 第 2 层：Manko 中文资料（无需 Key）
-            if (wantManko.length) await resolveViaManko(wantManko);
-            // 第 3 层：GetAV 精校中文（Manko 未命中时补查）
-            const stillNeedGetav = wantZh.filter((s) => !cache[s] || !cache[s].zh);
-            if (stillNeedGetav.length) await resolveViaGetav(stillNeedGetav);
+            // 第 2 层：GetAV 精校中文（无需 Key）
+            if (wantZh.length) await resolveViaGetav(wantZh);
+            // 第 3 层：Manko 中文资料（GetAV 未命中时补查）
+            const stillNeedManko = wantManko.filter((s) => !cache[s] || !cache[s].zh);
+            if (stillNeedManko.length) await resolveViaManko(stillNeedManko);
             // Jable 当前页已经是本源，不能重复请求自己；剩余部分交给大模型
             const todo = needLlm();
             for (let i = 0; i < todo.length; i += 20) {
@@ -1506,8 +1506,8 @@
         const needJa = allSlugs.filter((s) => !cache[s] || !cache[s].ja);
         // 中文标题链：GetAV 精校中文免费、无需 Key，缺中文的番号就是有工作可做
         // （含「来源升级」：超过 3 天的 llm 旧译文会重查 GetAV，命中以精校替换机翻）
-        const needManko = needMankoQuery(allSlugs);
         const needZh = needGetavQuery(allSlugs);
+        const needManko = needMankoQuery(allSlugs);
         // 日文抓取（iframe + CF 验证，成本高）只服务大模型翻译：没填 Key 抓到也没人翻，
         // 直接跳过，只跑免费中文源
         const jaWanted = !!config.apiKey;
@@ -1532,13 +1532,13 @@
             }
         };
         try {
-            // 第 2 层：Manko 中文资料源
-            if (needManko.length) await resolveViaManko(needManko);
-            // 第 3 层：GetAV 精校中文源
-            const stillNeedGetav = needZh.filter((s) => !cache[s] || !cache[s].zh);
-            if (stillNeedGetav.length) await resolveViaGetav(stillNeedGetav);
+            // 第 2 层：GetAV 精校中文源
+            if (needZh.length) await resolveViaGetav(needZh);
+            // 第 3 层：Manko 中文资料源（GetAV 未命中时补查）
+            const stillNeedManko = needManko.filter((s) => !cache[s] || !cache[s].zh);
+            if (stillNeedManko.length) await resolveViaManko(stillNeedManko);
             // 第 4 层：Jable 官方中文源
-            const stillNeedJable = stillNeedGetav.filter((s) => !cache[s] || !cache[s].zh);
+            const stillNeedJable = stillNeedManko.filter((s) => !cache[s] || !cache[s].zh);
             if (stillNeedJable.length) await resolveViaJable(stillNeedJable);
             // 免费源命中的番号已有可靠中文，连日文原文都不再需要——
             // 日文抓取和大模型只为免费源都没收录的番号兜底
@@ -1649,7 +1649,7 @@
         panel.innerHTML =
             '<div style="font-weight:600;margin-bottom:8px">' + ({ jable: 'Jable 标题增强设置', getav: 'GetAV 增强设置' }[SITE] || 'MissAV 综合增强设置') + '</div>' +
             '<button id="mve-save" style="width:100%;padding:6px;border:none;border-radius:6px;background:#3b7cd7;color:#fff;cursor:pointer">保存并应用</button>' +
-            '<div style="margin:6px 0 2px;font-size:11px;color:#8b93a5">中文标题：缓存 → Manko → GetAV 精校 → Jable 繁中 → 大模型兜底（前四级无需 Key）</div>' +
+            '<div style="margin:6px 0 2px;font-size:11px;color:#8b93a5">中文标题：缓存 → GetAV 精校 → Manko → Jable 繁中 → 大模型兜底（前四级无需 Key）</div>' +
             '<details open style="border-top:1px solid #2e3440;margin-top:4px">' +
             '<summary style="' + secStyle + '">大模型与 Key</summary>' +
             '<div style="' + boxStyle + '">' +
@@ -1816,7 +1816,7 @@
                 if (h && h.zh) src[h.zhSrc && src[h.zhSrc] !== undefined ? h.zhSrc : 'llm']++;
             });
             add('页面卡片', cardsNow.length + ' 个标题链接 / ' + uniq.length + ' 个番号');
-            add('缓存中文', 'manko ' + src.manko + ' / getav ' + src.getav + ' / jable ' + src.jable + ' / llm ' + src.llm);
+            add('缓存中文', 'getav ' + src.getav + ' / manko ' + src.manko + ' / jable ' + src.jable + ' / llm ' + src.llm);
         } catch (e) {
             add('页面卡片', '识别失败：' + (e && e.message));
         }
@@ -1825,6 +1825,20 @@
         const missN = keys.filter((k) => cache[k] && cache[k].getavMiss).length;
         const mankoMissN = keys.filter((k) => cache[k] && cache[k].mankoMiss).length;
         add('缓存', keys.length + ' 条（含中文 ' + zhN + '，GetAV 负缓存 ' + missN + '，Manko 负缓存 ' + mankoMissN + '）');
+        if (SITE !== 'getav' && typeof GM_xmlhttpRequest === 'function') {
+            add('GetAV 查询', '测试中…');
+            try {
+                const r = await httpGet('https://getav.net/zh/videos/jur-857');
+                const t = parseGetavTitle(r.text, 'jur-857');
+                lines[lines.length - 1] = 'GetAV 查询：HTTP ' + r.status +
+                    (t ? '，✓ 标题：' + t.slice(0, 40)
+                       : '，但解析不到合规标题（异常页面，前 100 字：' + r.text.slice(0, 100).replace(/\s+/g, ' ') + '）');
+            } catch (e) {
+                lines[lines.length - 1] = 'GetAV 查询：✗ 失败——' + e.message +
+                    '（研发版可点「打开 GetAV 验证页」，由手机顶层页面读取标题）';
+            }
+            out.textContent = lines.join('\n');
+        }
         if (typeof GM_xmlhttpRequest === 'function') {
             add('Manko 查询', '测试中（番号 ' + diagnosticSlug + '）…');
             try {
@@ -1841,20 +1855,6 @@
                 }
             } catch (e) {
                 lines[lines.length - 1] = 'Manko 查询：✗ 失败——' + e.message + '（可能是网络、后端域名或 @connect 授权限制）';
-            }
-            out.textContent = lines.join('\n');
-        }
-        if (SITE !== 'getav' && typeof GM_xmlhttpRequest === 'function') {
-            add('GetAV 查询', '测试中…');
-            try {
-                const r = await httpGet('https://getav.net/zh/videos/jur-857');
-                const t = parseGetavTitle(r.text, 'jur-857');
-                lines[lines.length - 1] = 'GetAV 查询：HTTP ' + r.status +
-                    (t ? '，✓ 标题：' + t.slice(0, 40)
-                       : '，但解析不到合规标题（异常页面，前 100 字：' + r.text.slice(0, 100).replace(/\s+/g, ' ') + '）');
-            } catch (e) {
-                lines[lines.length - 1] = 'GetAV 查询：✗ 失败——' + e.message +
-                    '（研发版可点「打开 GetAV 验证页」，由手机顶层页面读取标题）';
             }
             out.textContent = lines.join('\n');
         }

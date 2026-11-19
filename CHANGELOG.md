@@ -1,5 +1,9 @@
 # Changelog
 
+## [4.0.30-dev.7] - 2026-11-19
+
+- **调整研发版免费标题源顺序**：改为缓存 → GetAV → Manko → Jable → 大模型；诊断请求顺序同步改为 GetAV → Manko → Jable。
+
 ## [4.0.30-dev.6] - 2026-11-18
 
 - **调整研发版免费标题源顺序**：改为缓存 → Manko → GetAV → Jable → 大模型；诊断请求顺序同步改为 Manko → GetAV → Jable。Manko 命中后不再请求低优先级源。
