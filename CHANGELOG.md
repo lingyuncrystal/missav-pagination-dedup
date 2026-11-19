@@ -1,5 +1,9 @@
 # Changelog
 
+## [4.0.30-dev.16] - 2026-11-19
+
+- **增加 Tab 视觉兜底**：即使 Alpine 在 ScriptCat 隔离世界中拒绝外部状态赋值，也会强制同步详情/影片介绍的高亮、显示和隐藏状态；7mmtv 介绍文字和图片继续使用已验证的加载流程。
+
 ## [4.0.30-dev.15] - 2026-11-19
 
 - **最终修复 Alpine 状态切换**：在 ScriptCat 隔离世界中通过 `unsafeWindow.eval` 在页面世界执行 `currentTab = 'film_intro'`，确保 MissAV 响应式 Tab 高亮与内容面板同步切换。
