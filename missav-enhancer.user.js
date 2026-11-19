@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.19
+// @version      4.0.30-dev.20
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Manko → Jable 繁中 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -2333,7 +2333,7 @@
      * 图片只限制宽度为容器宽度，保持原始比例，不裁剪、不拉伸。
      * ================================================================ */
 
-    const filmIntroState = { installed: false, loading: false, cache: {} };
+    const filmIntroState = { installed: false, active: false, loading: false, cache: {} };
 
     function missavDetailSlug() {
         const slug = slugFromHref(location.href);
@@ -2446,6 +2446,7 @@
     }
 
     function activateFilmIntroTab(tab, panel, tabList, contentRoot, detailPanel, detailRoot, detailState) {
+        filmIntroState.active = true;
         try {
             const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : null;
             const pageDocument = pageWindow && pageWindow.document ? pageWindow.document : document;
@@ -2492,7 +2493,10 @@
             }
         };
         syncVisual(true);
-        [0, 50, 200, 500, 1000].forEach((ms) => setTimeout(() => syncVisual(true), ms));
+        // Alpine 可能在点击后回写样式；用户已切走时必须停止这些延迟校正。
+        [0, 50, 200, 500, 1000].forEach((ms) => setTimeout(() => {
+            if (filmIntroState.active) syncVisual(true);
+        }, ms));
         contentRoot.querySelectorAll('.tab-pane, [role="tabpanel"]').forEach((pane) => {
             if (pane !== panel) pane.classList.remove('active', 'show');
             if (pane !== panel) pane.hidden = true;
@@ -2543,7 +2547,9 @@
                 detailState = (pageAlpine.closestDataStack(detailRoot) || [])[0] || null;
             }
         } catch { /* Alpine 尚未完全初始化时仍可用 DOM 兜底 */ }
-        const contentRoot = document.querySelector('.tab-content') ||
+        // MissAV 的详情页没有 .tab-content；介绍面板必须挂在原详情面板旁，
+        // 否则退到 body 末尾，点击后只能在页脚之后看到内容。
+        const contentRoot = (detailPanel && detailPanel.parentElement) || document.querySelector('.tab-content') ||
             original.closest('section,main,article') || document.body;
         const panel = document.createElement('div');
         panel.id = 'mve-film-intro-panel';
@@ -2571,27 +2577,27 @@
             activateFilmIntroTab(tabControl, panel, tabList, contentRoot, detailPanel, detailRoot, detailState);
         });
         tabList.appendChild(tab);
-        contentRoot.appendChild(panel);
+        if (detailPanel && detailPanel.parentElement === contentRoot) {
+            detailPanel.insertAdjacentElement('afterend', panel);
+        } else {
+            contentRoot.appendChild(panel);
+        }
         tabList.addEventListener('click', (event) => {
             const clickedTab = event.target.closest('a,button,[role="tab"]');
             if (!clickedTab || clickedTab === tab || clickedTab.closest('.mve-film-intro-tab')) return;
             const isDetailsTab = /^(详情|Details?)$/i.test(clickedTab.textContent.trim());
+            filmIntroState.active = false;
             panel.hidden = true;
             panel.style.setProperty('display', 'none', 'important');
+            tab.setAttribute('aria-selected', 'false');
+            tab.classList.remove('border-red-400', 'text-red-400', 'active');
+            tab.classList.add('border-transparent', 'text-gray-500');
+            clickedTab.setAttribute('aria-selected', 'true');
             if (isDetailsTab) {
-                panel.hidden = true;
-                panel.style.setProperty('display', 'none', 'important');
                 if (detailPanel) detailPanel.hidden = false;
                 if (detailPanel) detailPanel.style.setProperty('display', '', 'important');
-                const detailsTab = [...tabList.querySelectorAll('a,button,[role="tab"]')].find((el) =>
-                    /^(详情|Details?)$/i.test(el.textContent.trim())
-                );
-                if (detailsTab) {
-                    detailsTab.classList.add('border-red-400', 'text-red-400');
-                    detailsTab.classList.remove('border-transparent', 'text-gray-500');
-                }
-                tab.classList.remove('border-red-400', 'text-red-400', 'active');
-                tab.classList.add('border-transparent', 'text-gray-500');
+                clickedTab.classList.add('border-red-400', 'text-red-400');
+                clickedTab.classList.remove('border-transparent', 'text-gray-500');
             }
         });
         filmIntroState.installed = true;
