@@ -1,5 +1,9 @@
 # Changelog
 
+## [4.0.30-dev.15] - 2026-11-19
+
+- **最终修复 Alpine 状态切换**：在 ScriptCat 隔离世界中通过 `unsafeWindow.eval` 在页面世界执行 `currentTab = 'film_intro'`，确保 MissAV 响应式 Tab 高亮与内容面板同步切换。
+
 ## [4.0.30-dev.14] - 2026-11-19
 
 - **修复页面世界节点传递**：使用 `unsafeWindow.document` 查找 Alpine 详情组件，再将页面世界节点传给 `Alpine.evaluate`，避免 ScriptCat 隔离世界节点导致 `currentTab` 更新无效。
