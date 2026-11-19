@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.8
+// @version      4.0.30-dev.9
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Manko → Jable 繁中 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -2444,7 +2444,7 @@
         }
     }
 
-    function activateFilmIntroTab(tab, panel, tabList, contentRoot) {
+    function activateFilmIntroTab(tab, panel, tabList, contentRoot, detailPanel) {
         tabList.querySelectorAll('a,button,[role="tab"]').forEach((el) => {
             if (el !== tab) {
                 el.setAttribute('aria-selected', 'false');
@@ -2457,6 +2457,10 @@
             if (pane !== panel) pane.classList.remove('active', 'show');
             if (pane !== panel) pane.hidden = true;
         });
+        if (detailPanel && detailPanel !== panel) {
+            detailPanel.hidden = true;
+            detailPanel.classList.remove('active', 'show');
+        }
         panel.hidden = false;
         panel.classList.add('active', 'show');
         if (filmIntroState.loading) return;
@@ -2481,6 +2485,12 @@
         const original = candidates[0];
         if (!original) return false;
         const tabList = original.closest('[role="tablist"],ul,.nav-tabs,.tabs') || original.parentElement;
+        const targetRef = original.getAttribute('data-bs-target') || original.getAttribute('data-target') ||
+            (original.getAttribute('href') || '').split('?')[0];
+        let detailPanel = null;
+        if (targetRef && targetRef.charAt(0) === '#') {
+            try { detailPanel = document.querySelector(targetRef); } catch { /* 忽略无效选择器 */ }
+        }
         const contentRoot = document.querySelector('.tab-content') ||
             original.closest('section,main,article') || document.body;
         const panel = document.createElement('div');
@@ -2490,8 +2500,11 @@
         const item = original.closest('li');
         const tab = (item ? item.cloneNode(true) : original.cloneNode(true));
         tab.querySelectorAll ? tab.querySelectorAll('[id]').forEach((el) => el.removeAttribute('id')) : null;
+        tab.classList.remove('active', 'show');
         const tabControl = tab.matches && tab.matches('a,button,[role="tab"]') ? tab : tab.querySelector('a,button,[role="tab"]');
         if (!tabControl) return false;
+        tabControl.classList.remove('active', 'show');
+        ['data-toggle', 'data-bs-toggle', 'data-target', 'data-bs-target', 'aria-controls'].forEach((name) => tabControl.removeAttribute(name));
         tabControl.textContent = '影片介绍';
         tabControl.classList.add('mve-film-intro-tab');
         tabControl.setAttribute('href', '#mve-film-intro-panel');
@@ -2499,12 +2512,16 @@
         tabControl.setAttribute('aria-selected', 'false');
         tabControl.addEventListener('click', (event) => {
             event.preventDefault();
-            activateFilmIntroTab(tabControl, panel, tabList, contentRoot);
+            event.stopPropagation();
+            activateFilmIntroTab(tabControl, panel, tabList, contentRoot, detailPanel);
         });
         tabList.appendChild(tab);
         contentRoot.appendChild(panel);
         tabList.addEventListener('click', (event) => {
-            if (!event.target.closest('.mve-film-intro-tab')) panel.hidden = true;
+            if (!event.target.closest('.mve-film-intro-tab')) {
+                panel.hidden = true;
+                if (detailPanel) detailPanel.hidden = false;
+            }
         });
         filmIntroState.installed = true;
         return true;
