@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.20
+// @version      4.0.30-dev.21
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Manko → Jable 繁中 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -2606,7 +2606,7 @@
 
     function initFilmIntroTab() {
         injectStyleOnce('mve-film-intro-style',
-            '.mve-film-intro-panel{padding:12px 0;line-height:1.7;}' +
+            '.mve-film-intro-panel{padding:12px 0;line-height:1.7;color:#b8babc;}' +
             '.mve-film-intro-text{white-space:pre-wrap;margin-bottom:16px;}' +
             '.mve-film-intro-images img{display:block;width:100%;height:auto;object-fit:contain;margin:0 auto 12px;}' +
             '.mve-film-intro-source{display:block;margin-top:16px;font-size:12px;opacity:.75;}');
