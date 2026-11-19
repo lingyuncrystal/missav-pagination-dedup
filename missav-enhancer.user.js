@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.13
+// @version      4.0.30-dev.14
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Manko → Jable 繁中 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -2447,10 +2447,15 @@
 
     function activateFilmIntroTab(tab, panel, tabList, contentRoot, detailPanel, detailRoot, detailState) {
         try {
-            const pageAlpine = typeof unsafeWindow !== 'undefined' ? unsafeWindow.Alpine :
+            const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : null;
+            const pageDocument = pageWindow && pageWindow.document ? pageWindow.document : document;
+            const pageAlpine = pageWindow ? pageWindow.Alpine :
                 (typeof Alpine !== 'undefined' ? Alpine : null);
-            if (detailRoot && pageAlpine && typeof pageAlpine.evaluate === 'function') {
-                pageAlpine.evaluate(detailRoot, 'currentTab = "film_intro"');
+            const liveRoot = [...pageDocument.querySelectorAll('[x-data]')].find((el) =>
+                (el.getAttribute('x-data') || '').indexOf('currentTab') !== -1
+            ) || detailRoot;
+            if (liveRoot && pageAlpine && typeof pageAlpine.evaluate === 'function') {
+                pageAlpine.evaluate(liveRoot, 'currentTab = "film_intro"');
             } else if (detailState) {
                 detailState.currentTab = 'film_intro';
             }

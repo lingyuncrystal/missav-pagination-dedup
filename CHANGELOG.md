@@ -1,5 +1,9 @@
 # Changelog
 
+## [4.0.30-dev.14] - 2026-11-19
+
+- **修复页面世界节点传递**：使用 `unsafeWindow.document` 查找 Alpine 详情组件，再将页面世界节点传给 `Alpine.evaluate`，避免 ScriptCat 隔离世界节点导致 `currentTab` 更新无效。
+
 ## [4.0.30-dev.13] - 2026-11-19
 
 - **修复 ScriptCat 沙箱下 Alpine 不可见**：通过 `unsafeWindow.Alpine` 调用页面实例，确保点击「影片介绍」时真正更新 MissAV 的响应式 `currentTab`。
