@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.23
+// @version      4.0.30-dev.24
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Manko → Jable 繁中 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -2640,7 +2640,8 @@
 
     function jableDetailSlug() {
         if (SITE !== 'jable') return '';
-        const match = location.pathname.match(/^\/videos\/([^/]+)\/?$/i);
+        // Jable 会把部分影片分流到 /s0/videos/...、/s1/videos/... 等路径。
+        const match = location.pathname.match(/^\/(?:s\d+\/)?videos\/([^/]+)\/?$/i);
         if (!match) return '';
         try {
             const slug = decodeURIComponent(match[1]).toLowerCase();

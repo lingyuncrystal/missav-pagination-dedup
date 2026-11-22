@@ -48,8 +48,14 @@ const loadLocators = new Function('SITE', 'location', 'document', `${locatorSnip
     const location = { pathname: '/videos/JUR-857/', origin: 'https://jable.tv' };
     const { jableDetailSlug } = loadLocators('jable', location, { querySelectorAll: () => [] });
     assert(jableDetailSlug() === 'jur-857', 'Jable 详情页提取小写番号');
+    location.pathname = '/s0/videos/MIAA-711/';
+    assert(jableDetailSlug() === 'miaa-711', 'Jable s0 分片详情页提取小写番号');
+    location.pathname = '/s12/videos/ABP-123/';
+    assert(jableDetailSlug() === 'abp-123', 'Jable 其他数字分片路径沿用同一规则');
     location.pathname = '/tags/office-lady/';
     assert(jableDetailSlug() === '', 'Jable 非详情页不安装影片介绍');
+    location.pathname = '/foo/videos/ABP-123/';
+    assert(jableDetailSlug() === '', '拒绝未知前缀伪详情路径');
 }
 
 {
