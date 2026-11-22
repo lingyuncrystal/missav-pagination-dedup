@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.22
+// @version      4.0.30-dev.23
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Manko → Jable 繁中 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -2617,17 +2617,184 @@
     }
 
     function initFilmIntroTab() {
-        injectStyleOnce('mve-film-intro-style',
-            '.mve-film-intro-panel{padding:12px 0;line-height:1.7;color:#b8babc;}' +
-            '.mve-film-intro-text{white-space:pre-wrap;margin-bottom:16px;}' +
-            '.mve-film-intro-images img{display:block;width:100%;height:auto;object-fit:contain;margin:0 auto 12px;}' +
-            '.mve-film-intro-source{display:block;margin-top:16px;font-size:12px;opacity:.75;}');
+        initFilmIntroStyles();
         if (ensureFilmIntroTab()) return;
         const observer = new MutationObserver(() => {
             if (ensureFilmIntroTab()) observer.disconnect();
         });
         observer.observe(document.body, { childList: true, subtree: true });
         setTimeout(() => observer.disconnect(), 12000);
+    }
+
+    function initFilmIntroStyles() {
+        injectStyleOnce('mve-film-intro-style',
+            '.mve-film-intro-panel{padding:12px 0;line-height:1.7;color:#b8babc;}' +
+            '.mve-film-intro-text{white-space:pre-wrap;margin-bottom:16px;}' +
+            '.mve-film-intro-images img{display:block;width:100%;height:auto;object-fit:contain;margin:0 auto 12px;}' +
+            '.mve-film-intro-source{display:block;margin-top:16px;font-size:12px;opacity:.75;}');
+    }
+
+    /* ---------------- Jable：标签与反馈框之间的影片介绍卡片 ---------------- */
+
+    const jableFilmIntroState = { installed: false, loading: false, observer: null };
+
+    function jableDetailSlug() {
+        if (SITE !== 'jable') return '';
+        const match = location.pathname.match(/^\/videos\/([^/]+)\/?$/i);
+        if (!match) return '';
+        try {
+            const slug = decodeURIComponent(match[1]).toLowerCase();
+            return /\d/.test(slug) ? slug : '';
+        } catch {
+            return '';
+        }
+    }
+
+    /**
+     * Jable 的标签区没有稳定的 id。优先找「標籤 / 标签 / Tags」标题所在的
+     * 小容器；找不到标题时，退回到包含最多 /tags/ 链接的直接父容器。
+     */
+    function findJableTagsSection() {
+        const tagLinks = [...document.querySelectorAll('a[href]')].filter((a) => {
+            try { return /\/tags\//i.test(new URL(a.href, location.origin).pathname); }
+            catch { return false; }
+        });
+        if (!tagLinks.length) return null;
+
+        const labels = [...document.querySelectorAll('h2,h3,h4,h5,h6,strong,b,span')];
+        const label = labels.find((el) => /^(?:標籤|标签|Tags?)\s*[:：]?$/i.test(el.textContent.trim()));
+        if (label) {
+            let section = label.parentElement;
+            for (let depth = 0; section && depth < 4; depth++, section = section.parentElement) {
+                if (tagLinks.some((link) => section.contains(link))) return section;
+                if (section.matches('main,article,body')) break;
+            }
+        }
+
+        const groups = new Map();
+        tagLinks.forEach((link) => {
+            const parent = link.parentElement;
+            if (parent) groups.set(parent, (groups.get(parent) || 0) + 1);
+        });
+        let best = null;
+        let bestCount = 0;
+        groups.forEach((count, parent) => {
+            if (count > bestCount) { best = parent; bestCount = count; }
+        });
+        return best;
+    }
+
+    function findJableFeedbackBox() {
+        return document.querySelector(
+            '#comments,#comment,#disqus_thread,.comments,.comment-section,.comment-area,.feedback,' +
+            'iframe[src*="disqus"],iframe[src*="comment"],iframe[title*="comment" i]'
+        );
+    }
+
+    /** 把卡片放到标签之后；评论框已存在时，确保卡片处于其前面的同级分支。 */
+    function placeJableFilmIntroCard(card, tagsSection) {
+        const feedback = findJableFeedbackBox();
+        if (feedback && (tagsSection.compareDocumentPosition(feedback) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+            let feedbackBranch = feedback;
+            while (feedbackBranch.parentElement && !feedbackBranch.parentElement.contains(tagsSection)) {
+                feedbackBranch = feedbackBranch.parentElement;
+            }
+            const common = feedbackBranch.parentElement;
+            // 若最低公共容器已经是 body/html，说明命中了页面其他位置的泛用
+            // feedback 元素；此时宁可紧跟标签插入，避免卡片被抬到页脚前。
+            if (common && common.contains(tagsSection) && !common.matches('body,html')) {
+                common.insertBefore(card, feedbackBranch);
+                return true;
+            }
+        }
+        tagsSection.insertAdjacentElement('afterend', card);
+        return true;
+    }
+
+    function renderJableFilmIntroError(body, error, retry) {
+        body.textContent = '';
+        const message = document.createElement('div');
+        message.className = 'mve-jable-film-intro-error';
+        message.textContent = '影片介绍读取失败：' + ((error && error.message) || error);
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'mve-jable-film-intro-retry';
+        button.textContent = '重新加载';
+        button.addEventListener('click', retry);
+        body.append(message, button);
+    }
+
+    function startJableFilmIntroLazyLoad(card, body, slug) {
+        let intersectionObserver = null;
+        const load = async () => {
+            if (jableFilmIntroState.loading) return;
+            jableFilmIntroState.loading = true;
+            if (intersectionObserver) intersectionObserver.disconnect();
+            body.textContent = '正在读取 7mmtv 影片介绍…';
+            try {
+                const data = await load7mmtvIntro(slug);
+                renderFilmIntro(body, data);
+            } catch (error) {
+                renderJableFilmIntroError(body, error, load);
+            } finally {
+                jableFilmIntroState.loading = false;
+            }
+        };
+        if (typeof IntersectionObserver !== 'function') {
+            load();
+            return;
+        }
+        intersectionObserver = new IntersectionObserver((entries) => {
+            if (entries.some((entry) => entry.isIntersecting)) load();
+        }, { rootMargin: '300px 0px' });
+        intersectionObserver.observe(card);
+    }
+
+    function ensureJableFilmIntroCard() {
+        if (jableFilmIntroState.installed) return true;
+        if (document.getElementById('mve-jable-film-intro')) {
+            jableFilmIntroState.installed = true;
+            return true;
+        }
+        const slug = jableDetailSlug();
+        if (!slug) return false;
+        const tagsSection = findJableTagsSection();
+        if (!tagsSection) return false;
+
+        const card = document.createElement('section');
+        card.id = 'mve-jable-film-intro';
+        card.className = 'mve-jable-film-intro';
+        const title = document.createElement('h5');
+        title.className = 'mve-jable-film-intro-title';
+        title.textContent = '影片介绍';
+        const body = document.createElement('div');
+        body.className = 'mve-jable-film-intro-body';
+        body.textContent = '滚动到此处时自动加载影片介绍…';
+        card.append(title, body);
+        placeJableFilmIntroCard(card, tagsSection);
+        startJableFilmIntroLazyLoad(card, body, slug);
+        jableFilmIntroState.installed = true;
+        return true;
+    }
+
+    function initJableFilmIntro() {
+        if (!jableDetailSlug()) return;
+        initFilmIntroStyles();
+        injectStyleOnce('mve-jable-film-intro-style',
+            '.mve-jable-film-intro{margin:24px 0;padding:16px;border:1px solid rgba(255,255,255,.12);' +
+            'border-radius:8px;background:rgba(18,18,18,.72);color:#d6d6d6;line-height:1.7;}' +
+            '.mve-jable-film-intro-title{margin:0 0 14px;color:#f2f2f2;font-size:18px;font-weight:600;}' +
+            '.mve-jable-film-intro-body{min-height:28px;}' +
+            '.mve-jable-film-intro-error{color:#f0a0a0;margin-bottom:10px;}' +
+            '.mve-jable-film-intro-retry{padding:6px 12px;border:1px solid #e05252;border-radius:4px;' +
+            'background:transparent;color:#f08080;cursor:pointer;}');
+        if (ensureJableFilmIntroCard()) return;
+        const observer = new MutationObserver(() => {
+            if (ensureJableFilmIntroCard()) observer.disconnect();
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+        jableFilmIntroState.observer = observer;
+        setTimeout(() => observer.disconnect(), 15000);
     }
 
     /* ================================================================
@@ -2653,6 +2820,7 @@
         injectStyleOnce('mve-jable-full-title',
             'h6.title{white-space:normal !important;overflow:visible !important;' +
             'text-overflow:clip !important;overflow-wrap:break-word;}');
+        initJableFilmIntro();
     }
 
     function initMissavUi() {
