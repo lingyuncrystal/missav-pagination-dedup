@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.21
+// @version      4.0.30-dev.22
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Manko → Jable 繁中 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -2340,6 +2340,21 @@
         return slug && /\d/.test(slug) && document.querySelector('h1') ? slug : '';
     }
 
+    /**
+     * 识别 MissAV 原生「详情」Tab。无语言前缀的页面可能显示日文「詳細」，
+     * 其他语言路由也会继续变化；优先读取 Alpine 的 video_details 状态绑定，
+     * 只有页面未暴露绑定时才退回多语言文字，避免功能依赖 /cn/ 路由。
+     */
+    function isFilmDetailsTab(el) {
+        if (!el || !el.getAttribute) return false;
+        const binding = ['@click', 'x-on:click', 'data-tab', 'data-target', 'data-bs-target', 'href', 'aria-controls']
+            .map((name) => el.getAttribute(name) || '')
+            .join(' ');
+        if (/video[_-]details/i.test(binding)) return true;
+        const text = el.textContent.trim().replace(/\s+/g, ' ');
+        return /^(?:详情(?:页|信息)?|詳情|詳細|Details?|세부 정보|Chi tiết|รายละเอียด|Détails|Dettagli|Detalles|Detalhes|Подробности)$/i.test(text);
+    }
+
     function parse7mmtvIntro(html, slug) {
         const doc = new DOMParser().parseFromString(html || '', 'text/html');
         const heading = doc.querySelector('.fullvideo-title, h1');
@@ -2473,7 +2488,7 @@
         tab.classList.add('active');
         const syncVisual = (active) => {
             const detailsTab = [...tabList.querySelectorAll('a,button,[role="tab"]')].find((el) =>
-                el !== tab && /^(详情|Details?)$/i.test(el.textContent.trim())
+                el !== tab && isFilmDetailsTab(el)
             );
             if (detailsTab) {
                 detailsTab.classList.toggle('border-red-400', !active);
@@ -2522,10 +2537,7 @@
 
     function ensureFilmIntroTab() {
         if (filmIntroState.installed || !missavDetailSlug()) return filmIntroState.installed;
-        const candidates = [...document.querySelectorAll('a,button,[role="tab"]')].filter((el) => {
-            const text = el.textContent.trim();
-            return text === '详情' || /^详情\s*(页|信息)?$/.test(text) || /^details?$/i.test(text);
-        });
+        const candidates = [...document.querySelectorAll('a,button,[role="tab"]')].filter(isFilmDetailsTab);
         const original = candidates[0];
         if (!original) return false;
         const tabList = original.closest('[role="tablist"],ul,.nav-tabs,.tabs') || original.parentElement;
@@ -2585,7 +2597,7 @@
         tabList.addEventListener('click', (event) => {
             const clickedTab = event.target.closest('a,button,[role="tab"]');
             if (!clickedTab || clickedTab === tab || clickedTab.closest('.mve-film-intro-tab')) return;
-            const isDetailsTab = /^(详情|Details?)$/i.test(clickedTab.textContent.trim());
+            const isDetailsTab = isFilmDetailsTab(clickedTab);
             filmIntroState.active = false;
             panel.hidden = true;
             panel.style.setProperty('display', 'none', 'important');
