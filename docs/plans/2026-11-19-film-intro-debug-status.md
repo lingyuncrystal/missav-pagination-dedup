@@ -5,7 +5,7 @@
 ## 当前研发版本
 
 - 分支：`dev`
-- 最新功能版本：`4.0.30-dev.24`
+- 最新功能版本：`4.0.30-dev.25`
 - 正式版 `main` 未修改
 - 研发版地址：`https://raw.githubusercontent.com/lingyuncrystal/missav-pagination-dedup/dev/missav-enhancer.user.js`
 
@@ -30,6 +30,7 @@
 - dev.22 修复无语言前缀的详情页不安装“影片介绍”：详情 Tab 现优先按 Alpine 的 `video_details` 绑定识别，并以多语言标签文字兜底，不再只支持“详情”与 “Details”。
 - dev.23 将同一套 7mmtv 影片介绍扩展到 Jable 详情页：卡片位于标签与评论反馈框之间，滚动临近时自动加载，失败时支持原位重试。
 - dev.24 补充 Jable `/s数字/videos/<番号>/` 分片详情路径识别，`/s0/videos/miaa-711/` 等页面现在与普通 `/videos/` 页面使用同一影片介绍流程。
+- dev.25 修复 Jable 详情主标题未进入标题增强链：将真站 `.header-left > h4` 无链接标题按当前番号收集，缓存命中与免费中文源结果现在会回写详情标题。
 
 ## 当前待手机复测
 
