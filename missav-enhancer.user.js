@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.25
+// @version      4.0.30-dev.26
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Manko → Jable 繁中 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -2195,6 +2195,70 @@
         #getav-sub-grid > div > button:hover svg {
             transform: scale(1.12) rotate(-6deg) !important;
         }
+
+        /* ============ 详情页演员卡片：简介 / 影片介绍 ============ */
+        .mve-getav-actor-tablist {
+            display: flex !important;
+            width: 100% !important;
+            margin: 0 0 16px !important;
+            border-bottom: 1px solid rgba(255,255,255,.10) !important;
+        }
+        .mve-getav-actor-tab {
+            position: relative !important;
+            display: inline-flex !important;
+            flex: 1 1 50% !important;
+            align-items: center !important;
+            justify-content: center !important;
+            min-width: 0 !important;
+            padding: 10px 8px !important;
+            border: 0 !important;
+            border-radius: 8px 8px 0 0 !important;
+            background: transparent !important;
+            color: rgba(255,255,255,.56) !important;
+            font: inherit !important;
+            font-size: 14px !important;
+            font-weight: 600 !important;
+            line-height: 1.4 !important;
+            cursor: pointer !important;
+            transition: color .18s ease, background .18s ease !important;
+        }
+        .mve-getav-actor-tab:hover {
+            color: #fda4af !important;
+            background: rgba(244,63,94,.06) !important;
+        }
+        .mve-getav-actor-tab[aria-selected="true"] {
+            color: #fb7185 !important;
+            background: rgba(244,63,94,.10) !important;
+        }
+        .mve-getav-actor-tab[aria-selected="true"]::after {
+            content: "";
+            position: absolute;
+            right: 12px;
+            bottom: -1px;
+            left: 12px;
+            height: 2px;
+            border-radius: 2px 2px 0 0;
+            background: #fb7185;
+        }
+        .mve-getav-actor-tab:focus-visible {
+            outline: 2px solid rgba(251,113,133,.78) !important;
+            outline-offset: -2px !important;
+        }
+        .mve-getav-actor-film-panel {
+            min-height: 36px;
+            padding: 0 2px 4px;
+            color: rgba(255,255,255,.72);
+            line-height: 1.7;
+        }
+        .mve-getav-actor-error { color: #fda4af; margin-bottom: 10px; }
+        .mve-getav-actor-retry {
+            padding: 7px 13px !important;
+            border: 1px solid rgba(251,113,133,.65) !important;
+            border-radius: 6px !important;
+            background: rgba(244,63,94,.08) !important;
+            color: #fda4af !important;
+            cursor: pointer !important;
+        }
         `;
         const style = document.createElement('style');
         style.id = 'getav-full-title-style';
@@ -2318,11 +2382,14 @@
                     expandGetavTruncated(root);
                 }
                 makeGetavThreeColumns();
+                ensureGetavActorTabs();
             }, 300);
         };
         fillGetavFromTitle(document);
         expandGetavTruncated(document);
         makeGetavThreeColumns();
+        initFilmIntroStyles();
+        ensureGetavActorTabs();
         new MutationObserver((muts) => {
             let hasAdded = false;
             for (const m of muts) {
@@ -2335,6 +2402,230 @@
             if (hasAdded) schedule();
         }).observe(document.body, { childList: true, subtree: true });
         window.addEventListener('load', schedule);
+    }
+
+    /* ---------------- GetAV：演员卡片内的简介 / 影片介绍 Tab ---------------- */
+
+    const getavActorTabsState = {
+        slug: '', card: null, originalChildren: [], originalDisplays: new Map(),
+        observer: null, loading: false, loaded: false, requestSeq: 0,
+    };
+
+    function getavDetailSlug() {
+        if (SITE !== 'getav') return '';
+        const match = location.pathname.match(/^\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?videos\/([^/]+)\/?$/i);
+        if (!match) return '';
+        try {
+            const slug = decodeURIComponent(match[1]).toLowerCase();
+            return /\d/.test(slug) ? slug : '';
+        } catch {
+            return '';
+        }
+    }
+
+    function isGetavActorProfileLink(anchor) {
+        try {
+            return /\/(?:stars?|actresses?|actors?|models?|performers?)\//i.test(
+                new URL(anchor.href, location.origin).pathname
+            );
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * 演员区没有可依赖的固定 id。优先以多语言“演员”标签和资料链接交叉定位；
+     * 若页面只剩卡片语义，则仅接受唯一的 section/article/card，歧义时宁可不挂载。
+     */
+    function findGetavActorCard() {
+        const links = [...document.querySelectorAll('a[href]')].filter(isGetavActorProfileLink);
+        if (!links.length) return null;
+        const actorLabel = /^(?:演员|演員|女优|女優|男優|明星|Cast|Stars?|Actresses?|Actors?|Performers?)\s*[:：]?$/i;
+        const labelled = new Set();
+        for (const link of links) {
+            let node = link.parentElement;
+            for (let depth = 0; node && depth < 7; depth++, node = node.parentElement) {
+                if (node.matches && node.matches('main,body,html')) break;
+                const labels = node.querySelectorAll ? node.querySelectorAll('h2,h3,h4,h5,h6,strong,b,span,p') : [];
+                if ([...labels].some((el) => actorLabel.test(el.textContent.trim()))) {
+                    labelled.add(node);
+                    break;
+                }
+            }
+        }
+        if (labelled.size === 1) return [...labelled][0];
+        if (labelled.size > 1) return null;
+
+        const semantic = new Set();
+        links.forEach((link) => {
+            const card = link.closest && link.closest('section,article,[class*="card" i],[class*="panel" i]');
+            if (card && !card.matches('main,body,html')) semantic.add(card);
+        });
+        return semantic.size === 1 ? [...semantic][0] : null;
+    }
+
+    function restoreGetavActorContent() {
+        getavActorTabsState.originalChildren.forEach((node) => {
+            const saved = getavActorTabsState.originalDisplays.get(node);
+            if (!node || !node.style || !saved) return;
+            if (saved.value) node.style.setProperty('display', saved.value, saved.priority);
+            else node.style.removeProperty('display');
+        });
+    }
+
+    function resetGetavActorTabsState() {
+        restoreGetavActorContent();
+        if (getavActorTabsState.observer) getavActorTabsState.observer.disconnect();
+        if (getavActorTabsState.card) {
+            const tabList = getavActorTabsState.card.querySelector('#mve-getav-actor-tabs');
+            const panel = getavActorTabsState.card.querySelector('#mve-getav-actor-film-panel');
+            if (tabList) tabList.remove();
+            if (panel) panel.remove();
+        }
+        getavActorTabsState.requestSeq++;
+        getavActorTabsState.slug = '';
+        getavActorTabsState.card = null;
+        getavActorTabsState.originalChildren = [];
+        getavActorTabsState.originalDisplays = new Map();
+        getavActorTabsState.observer = null;
+        getavActorTabsState.loading = false;
+        getavActorTabsState.loaded = false;
+    }
+
+    function renderGetavActorFilmError(panel, error, retry) {
+        panel.textContent = '';
+        const message = document.createElement('div');
+        message.className = 'mve-getav-actor-error';
+        message.textContent = '影片介绍读取失败：' + ((error && error.message) || error);
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'mve-getav-actor-retry';
+        button.textContent = '重新加载';
+        button.addEventListener('click', retry);
+        panel.append(message, button);
+    }
+
+    function setGetavActorTab(name) {
+        const card = getavActorTabsState.card;
+        if (!card) return;
+        const showFilm = name === 'film';
+        getavActorTabsState.originalChildren.forEach((node) => {
+            if (!node || !node.style) return;
+            if (showFilm) node.style.setProperty('display', 'none', 'important');
+            else {
+                const saved = getavActorTabsState.originalDisplays.get(node);
+                if (saved && saved.value) node.style.setProperty('display', saved.value, saved.priority);
+                else node.style.removeProperty('display');
+            }
+        });
+        const profileTab = card.querySelector('[data-mve-getav-tab="profile"]');
+        const filmTab = card.querySelector('[data-mve-getav-tab="film"]');
+        const panel = card.querySelector('#mve-getav-actor-film-panel');
+        if (profileTab) profileTab.setAttribute('aria-selected', String(!showFilm));
+        if (filmTab) filmTab.setAttribute('aria-selected', String(showFilm));
+        if (panel) {
+            panel.hidden = !showFilm;
+            panel.style.setProperty('display', showFilm ? 'block' : 'none', 'important');
+        }
+        if (showFilm && panel && !getavActorTabsState.loaded && !getavActorTabsState.loading) {
+            loadGetavActorFilmIntro(panel, getavActorTabsState.slug);
+        }
+    }
+
+    async function loadGetavActorFilmIntro(panel, slug) {
+        if (!panel || getavActorTabsState.loading || getavActorTabsState.loaded) return;
+        const requestSeq = ++getavActorTabsState.requestSeq;
+        getavActorTabsState.loading = true;
+        if (getavActorTabsState.observer) getavActorTabsState.observer.disconnect();
+        panel.textContent = '正在读取 7mmtv 影片介绍…';
+        try {
+            const data = await load7mmtvIntro(slug);
+            if (requestSeq !== getavActorTabsState.requestSeq || slug !== getavActorTabsState.slug) return;
+            renderFilmIntro(panel, data);
+            getavActorTabsState.loaded = true;
+        } catch (error) {
+            if (requestSeq !== getavActorTabsState.requestSeq || slug !== getavActorTabsState.slug) return;
+            renderGetavActorFilmError(panel, error, () => loadGetavActorFilmIntro(panel, slug));
+        } finally {
+            if (requestSeq === getavActorTabsState.requestSeq) getavActorTabsState.loading = false;
+        }
+    }
+
+    function startGetavActorFilmPreload(card, panel, slug) {
+        if (typeof IntersectionObserver !== 'function') {
+            loadGetavActorFilmIntro(panel, slug);
+            return;
+        }
+        const observer = new IntersectionObserver((entries) => {
+            if (entries.some((entry) => entry.isIntersecting)) loadGetavActorFilmIntro(panel, slug);
+        }, { rootMargin: '300px 0px' });
+        observer.observe(card);
+        getavActorTabsState.observer = observer;
+    }
+
+    function ensureGetavActorTabs() {
+        const slug = getavDetailSlug();
+        if (!slug) {
+            if (getavActorTabsState.card) resetGetavActorTabsState();
+            return false;
+        }
+        const card = findGetavActorCard();
+        if (!card) return false;
+        const existing = card.querySelector('#mve-getav-actor-tabs');
+        if (getavActorTabsState.slug === slug && getavActorTabsState.card === card && existing) return true;
+        if (getavActorTabsState.card) resetGetavActorTabsState();
+        if (existing) existing.remove();
+        const stalePanel = card.querySelector('#mve-getav-actor-film-panel');
+        if (stalePanel) stalePanel.remove();
+
+        const originalChildren = [...card.children];
+        const originalDisplays = new Map(originalChildren.map((node) => [node, {
+            value: node.style.getPropertyValue('display'),
+            priority: node.style.getPropertyPriority('display'),
+        }]));
+        const tabList = document.createElement('div');
+        tabList.id = 'mve-getav-actor-tabs';
+        tabList.className = 'mve-getav-actor-tablist';
+        tabList.setAttribute('role', 'tablist');
+        tabList.setAttribute('aria-label', '演员资料');
+        const profileTab = document.createElement('button');
+        profileTab.type = 'button';
+        profileTab.className = 'mve-getav-actor-tab';
+        profileTab.textContent = '简介';
+        profileTab.dataset.mveGetavTab = 'profile';
+        profileTab.setAttribute('role', 'tab');
+        profileTab.setAttribute('aria-selected', 'true');
+        profileTab.setAttribute('aria-controls', 'mve-getav-actor-profile');
+        const filmTab = document.createElement('button');
+        filmTab.type = 'button';
+        filmTab.className = 'mve-getav-actor-tab';
+        filmTab.textContent = '影片介绍';
+        filmTab.dataset.mveGetavTab = 'film';
+        filmTab.setAttribute('role', 'tab');
+        filmTab.setAttribute('aria-selected', 'false');
+        filmTab.setAttribute('aria-controls', 'mve-getav-actor-film-panel');
+        tabList.append(profileTab, filmTab);
+
+        const panel = document.createElement('div');
+        panel.id = 'mve-getav-actor-film-panel';
+        panel.className = 'mve-getav-actor-film-panel';
+        panel.setAttribute('role', 'tabpanel');
+        panel.hidden = true;
+        panel.style.setProperty('display', 'none', 'important');
+        panel.textContent = '演员卡片接近视口时自动加载影片介绍…';
+        card.insertBefore(tabList, card.firstChild);
+        card.appendChild(panel);
+
+        getavActorTabsState.slug = slug;
+        getavActorTabsState.card = card;
+        getavActorTabsState.originalChildren = originalChildren;
+        getavActorTabsState.originalDisplays = originalDisplays;
+        getavActorTabsState.loading = false;
+        getavActorTabsState.loaded = false;
+        profileTab.addEventListener('click', () => setGetavActorTab('profile'));
+        filmTab.addEventListener('click', () => setGetavActorTab('film'));
+        startGetavActorFilmPreload(card, panel, slug);
+        return true;
     }
 
     /* ================================================================
