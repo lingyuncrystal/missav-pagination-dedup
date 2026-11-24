@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.26
+// @version      4.0.30-dev.27
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Manko → Jable 繁中 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -2369,6 +2369,7 @@
     /** GetAV 界面增强入口（自带独立 Observer：增量扫描新增节点） */
     function initGetavUi() {
         injectGetavStyles();
+        initGetavListRecovery();
         let timer = null;
         let pendingRoots = []; // 收集新增节点：只扫变化子树，避免每次变动都全文档强制同步布局
         const schedule = () => {
@@ -2383,6 +2384,7 @@
                 }
                 makeGetavThreeColumns();
                 ensureGetavActorTabs();
+                captureGetavListSnapshot();
             }, 300);
         };
         fillGetavFromTitle(document);
@@ -2390,6 +2392,7 @@
         makeGetavThreeColumns();
         initFilmIntroStyles();
         ensureGetavActorTabs();
+        captureGetavListSnapshot();
         new MutationObserver((muts) => {
             let hasAdded = false;
             for (const m of muts) {
@@ -2402,6 +2405,89 @@
             if (hasAdded) schedule();
         }).observe(document.body, { childList: true, subtree: true });
         window.addEventListener('load', schedule);
+    }
+
+    /* ---------------- GetAV：返回列表页的页码/内容错位修复 ---------------- */
+
+    const getavListRecoveryState = { installed: false, reloadScheduled: false };
+
+    function getavListRouteInfo() {
+        if (SITE !== 'getav') return null;
+        const path = location.pathname.replace(/^\/[a-z]{2}(?:-[a-z]{2})?(?=\/)/i, '') || '/';
+        if (!/^\/(?:new-releases|latest|hot|library|search)\/?$/i.test(path)) return null;
+        const params = new URLSearchParams(location.search);
+        const sort = params.get('sort') || '';
+        const page = Math.max(1, Number.parseInt(params.get('page') || '1', 10) || 1);
+        return { path: path.toLowerCase(), sort, page, key: location.origin + path.toLowerCase() + '?sort=' + sort + '&page=' + page };
+    }
+
+    /** 只取去重后的前几部番号，避免统计链接/标题链接重复造成误判。 */
+    function getavVisibleListSignature() {
+        const slugs = [];
+        document.querySelectorAll('a[href*="/videos/"]').forEach((anchor) => {
+            try {
+                const path = new URL(anchor.href, location.origin).pathname;
+                const match = path.match(/\/videos\/([^/]+)\/?$/i);
+                if (!match) return;
+                const slug = decodeURIComponent(match[1]).toLowerCase();
+                if (/\d/.test(slug) && !slugs.includes(slug)) slugs.push(slug);
+            } catch { /* 忽略异常链接 */ }
+        });
+        return slugs.slice(0, 8).join('|');
+    }
+
+    function readGetavListSnapshot(key) {
+        try {
+            const raw = sessionStorage.getItem('mve-getav-list:' + key);
+            const snapshot = raw ? JSON.parse(raw) : null;
+            if (!snapshot || Date.now() - Number(snapshot.at || 0) > 30 * 60 * 1000) return null;
+            return snapshot;
+        } catch {
+            return null;
+        }
+    }
+
+    function captureGetavListSnapshot() {
+        const info = getavListRouteInfo();
+        if (!info) return false;
+        const signature = getavVisibleListSignature();
+        if (!signature) return false;
+        try {
+            sessionStorage.setItem('mve-getav-list:' + info.key, JSON.stringify({
+                page: info.page, sort: info.sort, signature, at: Date.now(),
+            }));
+        } catch { /* 隐私模式/禁用存储时降级为无状态修复 */ }
+        return true;
+    }
+
+    function recoverGetavListAfterBack() {
+        const info = getavListRouteInfo();
+        if (!info || getavListRecoveryState.reloadScheduled) return false;
+        const signature = getavVisibleListSignature();
+        if (!signature) return false;
+        const previous = readGetavListSnapshot(info.key);
+        if (previous && previous.page === info.page && previous.sort === info.sort && previous.signature !== signature) {
+            getavListRecoveryState.reloadScheduled = true;
+            log('GetAV 返回列表页检测到页码与内容错位，重新加载：', info.key);
+            setTimeout(() => location.reload(), 80);
+            return true;
+        }
+        captureGetavListSnapshot();
+        return false;
+    }
+
+    function initGetavListRecovery() {
+        if (getavListRecoveryState.installed) return;
+        getavListRecoveryState.installed = true;
+        // 首次进入先校验已有 sessionStorage 快照；正常首屏没有快照，不会刷新。
+        recoverGetavListAfterBack();
+        window.addEventListener('popstate', () => {
+            // Next.js 先改 URL、随后异步替换列表；延迟到列表 DOM 稳定后再校验。
+            setTimeout(recoverGetavListAfterBack, 650);
+        });
+        window.addEventListener('pageshow', (event) => {
+            if (event.persisted) setTimeout(recoverGetavListAfterBack, 650);
+        });
     }
 
     /* ---------------- GetAV：演员卡片内的简介 / 影片介绍 Tab ---------------- */
