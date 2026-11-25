@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.32
+// @version      4.0.30-dev.33
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Manko → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -818,13 +818,17 @@
         const hit = cache[key];
         if (hit && hit.zh && hit.image) return hit;
         try {
-            const url = location.origin + '/' + getavSeriesLocale() + '/series/' + encodeURIComponent(id);
-            const r = await httpGet(url);
-            if (r.status < 200 || r.status >= 300) return null;
-            const meta = parseGetavSeriesMeta(r.text);
-            if (!meta) return null;
-            cache[key] = { zh: meta.name, image: meta.image, imageChecked: true, zhSrc: 'getav-series', updatedAt: Date.now() };
-            return cache[key];
+            const base = location.origin + '/' + getavSeriesLocale();
+            const urls = [base + '/series/' + encodeURIComponent(id), base + '/series?id=' + encodeURIComponent(id)];
+            for (const url of urls) {
+                const r = await httpGet(url);
+                if (r.status < 200 || r.status >= 300) continue;
+                const meta = parseGetavSeriesMeta(r.text);
+                if (!meta) continue;
+                cache[key] = { zh: meta.name, image: meta.image, imageChecked: true, zhSrc: 'getav-series', updatedAt: Date.now() };
+                return cache[key];
+            }
+            return null;
         } catch (e) {
             log('GetAV 系列详情查询失败 ' + id, e);
             return null;
@@ -2083,19 +2087,24 @@
         if (!isGetavSubscriptionsPage()) return [];
         const out = [];
         const seen = new Set();
-        document.querySelectorAll('a[href*="/series/"]').forEach((anchor) => {
+        document.querySelectorAll('a[href], [data-href], [data-url]').forEach((anchor) => {
             let id = '';
             try {
-                const path = new URL(anchor.href, location.origin).pathname;
+                const rawHref = anchor.href || anchor.getAttribute('data-href') || anchor.getAttribute('data-url') || '';
+                const url = new URL(rawHref, location.origin);
+                const path = url.pathname;
                 const match = path.match(/\/series\/([^/]+)\/?$/i);
                 id = match ? decodeURIComponent(match[1]).toLowerCase() : '';
+                if (!id && /\/series\/?$/i.test(path)) {
+                    id = String(url.searchParams.get('id') || url.searchParams.get('series') || url.searchParams.get('seriesId') || '').toLowerCase();
+                }
             } catch { /* 忽略异常链接 */ }
             if (!id) return;
             const card = anchor.closest('div.flex.flex-col,article,li') || anchor.parentElement;
-            const name = anchor.querySelector('p.truncate,p,[class*="name" i]') || anchor;
-            const key = id + '|' + (card ? String(card) : 'orphan');
-            if (seen.has(key)) return;
-            seen.add(key);
+            const name = anchor.querySelector('p.truncate,p,[class*="name" i]') ||
+                (card && card.querySelector('p.truncate,p,[class*="name" i],h3,h4')) || anchor;
+            if (seen.has(id)) return;
+            seen.add(id);
             out.push({ id, anchor, name, hidden: card ? getComputedStyle(card).display === 'none' : false });
         });
         return out;

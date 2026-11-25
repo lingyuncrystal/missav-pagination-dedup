@@ -5,7 +5,7 @@
 ## 当前研发版本
 
 - 分支：`dev`
-- 最新功能版本：`4.0.30-dev.32`
+- 最新功能版本：`4.0.30-dev.33`
 - 正式版 `main` 未修改
 - 研发版地址：`https://raw.githubusercontent.com/lingyuncrystal/missav-pagination-dedup/dev/missav-enhancer.user.js`
 
@@ -38,6 +38,7 @@
 - dev.30 将返回恢复扩展到 `/stars/<id>?page=<n>` 演员作品分页，例如 `/zh/stars/1476?page=2`。
 - dev.31 移除 MissAV/GetAV 标题替换链对 Jable 详情页的外部获取；Jable 自身标题处理和影片介绍模块不变。
 - dev.32 修复订阅系列卡片只处理首项和图片不显示：改为全页扫描系列链接，兼容详情页相对/懒加载图片，并解除封面对固定网格容器的样式依赖。
+- dev.33 继续兼容订阅系列实体的普通链接、data 属性和查询式详情地址，并对两种系列详情 URL 依次尝试。
 
 ## 当前待手机复测
 
