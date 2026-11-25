@@ -44,13 +44,9 @@ assert(parseName('<h1>Series 123</h1>') === null, '没有中文名时不误写�
 const collectSnippet = between('    function collectGetavSubscriptionCards()', '    let getavSeriesRunning');
 const collect = new Function('SITE', 'location', 'document', 'getComputedStyle',
     `function isGetavSubscriptionsPage() { return SITE === 'getav' && /\\/profile\\/subscriptions/.test(location.pathname); }\n${collectSnippet}; return collectGetavSubscriptionCards;`);
-const card = {
-    querySelector(selector) {
-        if (selector === 'a[href*="/series/"]') return { href: 'https://getav.net/zh/series/440', querySelector: () => ({ textContent: '制服 Series' }) };
-        return null;
-    },
-};
-const document = { querySelectorAll: () => [card] };
+const card = { querySelector: () => null, closest: () => card };
+const anchor = { href: 'https://getav.net/zh/series/440', querySelector: () => ({ textContent: '制服 Series' }), closest: () => card };
+const document = { querySelectorAll: () => [anchor] };
 const cards = collect('getav', { pathname: '/zh/profile/subscriptions', origin: 'https://getav.net' }, document, () => ({ display: 'block' }))();
 assert(cards.length === 1 && cards[0].id === '440' && cards[0].name.textContent === '制服 Series', '订阅卡片提取系列详情 id 与名称节点');
 

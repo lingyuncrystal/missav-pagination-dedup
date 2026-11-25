@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.31
+// @version      4.0.30-dev.32
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Manko → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -801,11 +801,11 @@
         const og = doc.querySelector('meta[property="og:image"][content],meta[name="twitter:image"][content]');
         if (og) image = og.getAttribute('content') || '';
         if (!image) {
-            const candidate = [...doc.querySelectorAll('img[src]')].find((img) => {
-                const src = img.getAttribute('src') || '';
-                return /^https?:/i.test(src) && !/logo|favicon|avatar/i.test(src);
+            const candidate = [...doc.querySelectorAll('img[src],img[data-src],img[data-original]')].find((img) => {
+                const src = img.getAttribute('data-src') || img.getAttribute('data-original') || img.getAttribute('src') || '';
+                return src && !/logo|favicon|avatar/i.test(src);
             });
-            image = candidate ? candidate.getAttribute('src') || '' : '';
+            image = candidate ? (candidate.getAttribute('data-src') || candidate.getAttribute('data-original') || candidate.getAttribute('src') || '') : '';
         }
         try {
             image = image ? new URL(image, location.origin).href : '';
@@ -2082,9 +2082,8 @@
     function collectGetavSubscriptionCards() {
         if (!isGetavSubscriptionsPage()) return [];
         const out = [];
-        document.querySelectorAll('#getav-sub-grid > div, div.divide-y > div.flex.flex-col').forEach((card) => {
-            const anchor = card.querySelector('a[href*="/series/"]');
-            if (!anchor) return;
+        const seen = new Set();
+        document.querySelectorAll('a[href*="/series/"]').forEach((anchor) => {
             let id = '';
             try {
                 const path = new URL(anchor.href, location.origin).pathname;
@@ -2092,8 +2091,12 @@
                 id = match ? decodeURIComponent(match[1]).toLowerCase() : '';
             } catch { /* 忽略异常链接 */ }
             if (!id) return;
-            const name = anchor.querySelector('p.truncate, p') || anchor;
-            out.push({ id, anchor, name, hidden: getComputedStyle(card).display === 'none' });
+            const card = anchor.closest('div.flex.flex-col,article,li') || anchor.parentElement;
+            const name = anchor.querySelector('p.truncate,p,[class*="name" i]') || anchor;
+            const key = id + '|' + (card ? String(card) : 'orphan');
+            if (seen.has(key)) return;
+            seen.add(key);
+            out.push({ id, anchor, name, hidden: card ? getComputedStyle(card).display === 'none' : false });
         });
         return out;
     }
@@ -2107,12 +2110,13 @@
         if (!img) {
             img = document.createElement('img');
             img.dataset.mveGetavSeriesImage = '1';
+            img.className = 'mve-getav-series-image';
             img.alt = card.name ? card.name.textContent.trim() : '系列封面';
             img.loading = 'lazy';
             const anchor = card.anchor;
             anchor.insertBefore(img, anchor.firstChild);
         }
-        if (img.src !== image) img.src = image;
+        if (img.getAttribute('src') !== image) img.setAttribute('src', image);
     }
 
     async function enhanceGetavSubscriptionNames() {
@@ -2270,6 +2274,7 @@
             text-align: center !important;
             text-decoration: none !important;
         }
+        .mve-getav-series-image,
         #getav-sub-grid > div > a.flex img[data-mve-getav-series-image] {
             display: block !important;
             width: 72px !important;
