@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.27
+// @version      4.0.30-dev.28
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Manko → Jable 繁中 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -14,6 +14,14 @@
 // @match        https://jable.tv/*
 // @match        *://getav.net/*
 // @match        *://*.getav.net/*
+// @match        *://getav.co/*
+// @match        *://*.getav.co/*
+// @match        *://getav.live/*
+// @match        *://*.getav.live/*
+// @match        *://getav.top/*
+// @match        *://*.getav.top/*
+// @match        *://getav.me/*
+// @match        *://*.getav.me/*
 // MissAV 经常更换域名后缀，用 @include 正则兜底所有 missav.<TLD> 变体
 // （正则要求 missav. 后紧跟纯字母 TLD 和 /，不会被 missav.evil.com 这类域名欺骗）
 // @include      /^https?:\/\/([^/]*\.)?missav\.[a-z]{2,}\//
@@ -25,6 +33,10 @@
 // @grant        GM_openInTab
 // @grant        unsafeWindow
 // @connect      getav.net
+// @connect      getav.co
+// @connect      getav.live
+// @connect      getav.top
+// @connect      getav.me
 // @connect      jable.tv
 // @connect      7mmtv.sx
 // @connect      manko.fun
@@ -50,7 +62,7 @@
 
     /** 站点识别：rescue/grid/dedup/preview 是 MissAV 专属，getav-ui 是 GetAV 专属；titles 与设置面板三站共用 */
     const SITE = /(^|\.)jable\.tv$/i.test(location.hostname) ? 'jable'
-        : /(^|\.)getav\.net$/i.test(location.hostname) ? 'getav'
+        : /(^|\.)getav\.(?:net|co|live|top|me)$/i.test(location.hostname) ? 'getav'
         : 'missav';
 
     /** 统一日志（用 warn 级别，普通控制台过滤 info 时仍可见） */
@@ -761,6 +773,47 @@
             return title || null;
         } catch (e) {
             log('GetAV 查询失败 ' + slug, e);
+            return null;
+        }
+    }
+
+    /** ---------------- GetAV 演员详情中文名源 ----------------
+     * 订阅页的演员卡片链接是 /stars/<数字>，详情 h1 直出中文名和日文名；
+     * 只取 h1 的中文部分，去掉“女优/男优”后缀后回写卡片。
+     */
+    function getavStarCacheKey(id) {
+        return '@getav-star:' + String(id || '').toLowerCase();
+    }
+
+    function getavStarLocale() {
+        const match = location.pathname.match(/^\/([a-z]{2}(?:-[a-z]{2})?)(?:\/|$)/i);
+        return match ? match[1].toLowerCase() : 'zh';
+    }
+
+    function parseGetavStarName(html) {
+        if (!html) return null;
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const h1 = doc.querySelector('h1');
+        if (!h1) return null;
+        const text = h1.textContent.replace(/\s+/g, ' ').trim();
+        const name = text.replace(/\s*(?:女优|女優|男优|男優|演员|演員)\s*$/i, '').trim();
+        return name && HAN_RE.test(name) ? name : null;
+    }
+
+    async function fetchGetavStarName(id) {
+        const key = getavStarCacheKey(id);
+        const hit = cache[key];
+        if (hit && hit.zh) return hit.zh;
+        try {
+            const url = location.origin + '/' + getavStarLocale() + '/stars/' + encodeURIComponent(id);
+            const r = await httpGet(url);
+            if (r.status < 200 || r.status >= 300) return null;
+            const name = parseGetavStarName(r.text);
+            if (!name) return null;
+            cache[key] = { zh: name, zhSrc: 'getav-star', updatedAt: Date.now() };
+            return name;
+        } catch (e) {
+            log('GetAV 演员详情查询失败 ' + id, e);
             return null;
         }
     }
@@ -2019,6 +2072,74 @@
         return SITE === 'getav' && /\/profile\/subscriptions/.test(location.pathname);
     }
 
+    function collectGetavSubscriptionCards() {
+        if (!isGetavSubscriptionsPage()) return [];
+        const out = [];
+        document.querySelectorAll('#getav-sub-grid > div, div.divide-y > div.flex.flex-col').forEach((card) => {
+            const anchor = card.querySelector('a[href*="/stars/"]');
+            if (!anchor) return;
+            let id = '';
+            try {
+                const path = new URL(anchor.href, location.origin).pathname;
+                const match = path.match(/\/stars\/([^/]+)\/?$/i);
+                id = match ? decodeURIComponent(match[1]).toLowerCase() : '';
+            } catch { /* 忽略异常链接 */ }
+            if (!id) return;
+            const name = anchor.querySelector('p.truncate, p') || anchor;
+            out.push({ id, anchor, name, hidden: getComputedStyle(card).display === 'none' });
+        });
+        return out;
+    }
+
+    let getavStarRunning = false;
+    let getavStarRerun = false;
+
+    async function enhanceGetavSubscriptionNames() {
+        if (!config.titlesEnabled || !isGetavSubscriptionsPage()) return;
+        if (getavStarRunning) {
+            getavStarRerun = true;
+            return;
+        }
+        const cards = collectGetavSubscriptionCards().filter((card) => !card.hidden);
+        if (!cards.length) return;
+        const pending = [];
+        cards.forEach((card) => {
+            const key = getavStarCacheKey(card.id);
+            const hit = cache[key];
+            if (hit && hit.zh) {
+                if (card.name.textContent.trim() !== hit.zh) setTextSafe(card.name, hit.zh);
+                return;
+            }
+            // 页面本身已显示中文时直接缓存，避免重复请求详情。
+            const current = card.name.textContent.trim();
+            if (classifyTitle(current) === 'cn') {
+                cache[key] = { zh: current, zhSrc: 'getav-star-dom', updatedAt: Date.now() };
+                return;
+            }
+            pending.push(card);
+        });
+        if (!pending.length) {
+            saveCache(cache);
+            return;
+        }
+        getavStarRunning = true;
+        try {
+            for (let i = 0; i < pending.length; i += 3) {
+                await Promise.all(pending.slice(i, i + 3).map(async (card) => {
+                    const name = await fetchGetavStarName(card.id);
+                    if (name && document.contains(card.name)) setTextSafe(card.name, name);
+                }));
+                saveCache(cache);
+            }
+        } finally {
+            getavStarRunning = false;
+            if (getavStarRerun) {
+                getavStarRerun = false;
+                setTimeout(enhanceGetavSubscriptionNames, 300);
+            }
+        }
+    }
+
     /** querySelectorAll 的补充：动态加载时新增节点本身可能也匹配选择器，需把 root 自身纳入 */
     function queryAllWithSelf(root, selector) {
         const list = [...(root || document).querySelectorAll(selector)];
@@ -2385,6 +2506,7 @@
                 makeGetavThreeColumns();
                 ensureGetavActorTabs();
                 captureGetavListSnapshot();
+                enhanceGetavSubscriptionNames();
             }, 300);
         };
         fillGetavFromTitle(document);
@@ -2393,6 +2515,7 @@
         initFilmIntroStyles();
         ensureGetavActorTabs();
         captureGetavListSnapshot();
+        enhanceGetavSubscriptionNames();
         new MutationObserver((muts) => {
             let hasAdded = false;
             for (const m of muts) {
@@ -2414,7 +2537,7 @@
     function getavListRouteInfo() {
         if (SITE !== 'getav') return null;
         const path = location.pathname.replace(/^\/[a-z]{2}(?:-[a-z]{2})?(?=\/)/i, '') || '/';
-        if (!/^\/(?:new-releases|latest|hot|library|search)\/?$/i.test(path)) return null;
+        if (!/^\/(?:new-releases|latest|hot|library|search|stars)\/?$/i.test(path)) return null;
         const params = new URLSearchParams(location.search);
         const sort = params.get('sort') || '';
         const page = Math.max(1, Number.parseInt(params.get('page') || '1', 10) || 1);

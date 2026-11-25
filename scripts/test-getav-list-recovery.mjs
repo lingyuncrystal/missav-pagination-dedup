@@ -38,6 +38,14 @@ const makeRoute = new Function('SITE', 'location', 'URLSearchParams', `${routeSn
 }
 
 {
+    const route = makeRoute('getav', {
+        origin: 'https://getav.net', pathname: '/zh/stars', search: '?page=3',
+    }, URLSearchParams);
+    const info = route();
+    assert(info.path === '/stars' && info.page === 3, '演员列表页第 3 页纳入返回恢复');
+}
+
+{
     const route = makeRoute('getav', { origin: 'https://getav.net', pathname: '/zh/videos/miaa-711', search: '' }, URLSearchParams);
     assert(route() === null, '详情页不触发列表恢复');
 }
