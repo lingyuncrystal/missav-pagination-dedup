@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.30
-// @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Manko → Jable 繁中 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
+// @version      4.0.30-dev.31
+// @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Manko → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
 // @icon         https://missav.ws/favicon.ico
@@ -428,7 +428,7 @@
     }
 
     /* ================================================================
-     * 模块五 titles：标题修正（中文标题链：缓存 → GetAV → Manko → Jable → 大模型）
+     * 模块五 titles：标题修正（中文标题链：缓存 → GetAV → Manko → 大模型）
      * 大模型服务商预设见 PROVIDERS：选中即自动填好地址与默认模型，
      * 用户只需粘贴 Key；「自定义」保留手填入口（OpenAI 兼容接口）。
      * Jable 走独立流程：中文原标题封面加「字幕」徽章，日文原标题
@@ -1033,7 +1033,6 @@
         return missed;
     }
     const resolveViaGetav = (slugs) => resolveVia(slugs, fetchGetavTitle, 'getav');
-    const resolveViaJable = (slugs) => resolveVia(slugs, fetchJableTitle, 'jable');
     const resolveViaManko = (slugs) => resolveVia(slugs, fetchMankoTitle, 'manko');
 
     /* ---------------- 免费标题源查询候选（含「来源升级」） ----------------
@@ -1493,7 +1492,7 @@
         return cards;
     }
 
-    /** GetAV 主流程：本站中文直接入缓存；日文原标题走「缓存 → Manko → Jable → 大模型」（不查自己） */
+    /** GetAV 主流程：本站中文直接入缓存；日文原标题走「缓存 → Manko → 大模型」（不查自己） */
     async function enhanceGetavTitles() {
         if (running) {
             rerunAfter = true;
@@ -1512,10 +1511,8 @@
         running = true;
         setButtonState('translating');
         try {
-            // GetAV 上的日文原标题：先查 Manko，再查 Jable，最后轮到大模型
+            // GetAV 上的日文原标题：先查 Manko，最后轮到大模型
             if (wantManko.length) await resolveViaManko(wantManko);
-            const stillNeedJable = wantZh.filter((s) => !cache[s] || !cache[s].zh);
-            if (stillNeedJable.length) await resolveViaJable(stillNeedJable);
             const todo = needLlm();
             for (let i = 0; i < todo.length; i += 20) {
                 const chunk = todo.slice(i, i + 20);
@@ -1588,7 +1585,7 @@
         return applied;
     }
 
-    /** 主流程：先取中文（GetAV / Jable），未收录的再抓日文交给大模型兜底 */
+    /** 主流程：先取中文（GetAV / Manko），未收录的再抓日文交给大模型兜底 */
     async function enhanceTitles() {
         if (!config.titlesEnabled) return;
         if (SITE === 'jable') return enhanceJableTitles();
@@ -1636,9 +1633,6 @@
             // 第 3 层：Manko 中文资料源（GetAV 未命中时补查）
             const stillNeedManko = needManko.filter((s) => !cache[s] || !cache[s].zh);
             if (stillNeedManko.length) await resolveViaManko(stillNeedManko);
-            // 第 4 层：Jable 官方中文源
-            const stillNeedJable = stillNeedManko.filter((s) => !cache[s] || !cache[s].zh);
-            if (stillNeedJable.length) await resolveViaJable(stillNeedJable);
             // 免费源命中的番号已有可靠中文，连日文原文都不再需要——
             // 日文抓取和大模型只为免费源都没收录的番号兜底
             const needJa2 = needJa.filter((s) => !cache[s] || !cache[s].zh);
@@ -1748,7 +1742,7 @@
         panel.innerHTML =
             '<div style="font-weight:600;margin-bottom:8px">' + ({ jable: 'Jable 标题增强设置', getav: 'GetAV 增强设置' }[SITE] || 'MissAV 综合增强设置') + '</div>' +
             '<button id="mve-save" style="width:100%;padding:6px;border:none;border-radius:6px;background:#3b7cd7;color:#fff;cursor:pointer">保存并应用</button>' +
-            '<div style="margin:6px 0 2px;font-size:11px;color:#8b93a5">中文标题：缓存 → GetAV 精校 → Manko → Jable 繁中 → 大模型兜底（前四级无需 Key）</div>' +
+            '<div style="margin:6px 0 2px;font-size:11px;color:#8b93a5">中文标题：缓存 → GetAV 精校 → Manko → 大模型兜底（前三级无需 Key；不再抓取 Jable）</div>' +
             '<details style="border-top:1px solid #2e3440;margin-top:4px">' +
             '<summary style="' + secStyle + '">大模型与 Key</summary>' +
             '<div style="' + boxStyle + '">' +

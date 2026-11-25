@@ -5,7 +5,7 @@
 ## 当前研发版本
 
 - 分支：`dev`
-- 最新功能版本：`4.0.30-dev.30`
+- 最新功能版本：`4.0.30-dev.31`
 - 正式版 `main` 未修改
 - 研发版地址：`https://raw.githubusercontent.com/lingyuncrystal/missav-pagination-dedup/dev/missav-enhancer.user.js`
 
@@ -36,6 +36,7 @@
 - dev.28 将演员列表 `/stars` 纳入同一返回恢复；扩展 `getav.co`、`getav.live`、`getav.top`、`getav.me` 域名匹配；订阅页演员卡片从 `/stars/<id>` 详情 h1 读取中文名并缓存回写。
 - dev.29 修正订阅页目标：改为处理 `/series/<id>` 系列卡片，从系列详情 h1 读取中文名称，并从 `og:image` 或详情首张图片补回系列封面。
 - dev.30 将返回恢复扩展到 `/stars/<id>?page=<n>` 演员作品分页，例如 `/zh/stars/1476?page=2`。
+- dev.31 移除 MissAV/GetAV 标题替换链对 Jable 详情页的外部获取；Jable 自身标题处理和影片介绍模块不变。
 
 ## 当前待手机复测
 
