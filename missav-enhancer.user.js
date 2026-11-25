@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.33
+// @version      4.0.30-dev.34
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Manko → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -799,7 +799,11 @@
         if (!name || !HAN_RE.test(name)) return null;
         let image = '';
         const og = doc.querySelector('meta[property="og:image"][content],meta[name="twitter:image"][content]');
-        if (og) image = og.getAttribute('content') || '';
+        if (og) {
+            const candidate = og.getAttribute('content') || '';
+            // GetAV 系列页的默认 og:image 是通用 opengraph-image.png，不能当作封面。
+            if (candidate && !/opengraph-image|logo|favicon|avatar/i.test(candidate)) image = candidate;
+        }
         if (!image) {
             const candidate = [...doc.querySelectorAll('img[src],img[data-src],img[data-original]')].find((img) => {
                 const src = img.getAttribute('data-src') || img.getAttribute('data-original') || img.getAttribute('src') || '';
@@ -2577,6 +2581,13 @@
             if (hasAdded) schedule();
         }).observe(document.body, { childList: true, subtree: true });
         window.addEventListener('load', schedule);
+        // 订阅页的“演员/系列”是同页切换，不一定触发新增节点；切到系列后主动重扫。
+        document.addEventListener('click', (event) => {
+            if (!isGetavSubscriptionsPage()) return;
+            const target = event.target && event.target.closest ? event.target.closest('button,[role="tab"]') : null;
+            if (!target || !/系列/.test(target.textContent || '')) return;
+            setTimeout(enhanceGetavSubscriptionNames, 350);
+        }, true);
     }
 
     /* ---------------- GetAV：返回列表页的页码/内容错位修复 ---------------- */
