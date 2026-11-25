@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.39
+// @version      4.0.30-dev.42
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Manko → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -858,6 +858,12 @@
         return match ? match[1].toLowerCase() : 'zh';
     }
 
+    /** 全站分享图、品牌图和头像都不是系列封面，包括旧版本已写入缓存的值。 */
+    function isGetavSeriesImageUsable(image) {
+        const src = String(image || '').trim();
+        return !!src && !/opengraph-image|logo|favicon|avatar/i.test(src);
+    }
+
     function parseGetavSeriesMeta(html, fallbackName) {
         if (!html) return null;
         const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -873,19 +879,28 @@
         if (og) {
             const candidate = og.getAttribute('content') || '';
             // GetAV 系列页的默认 og:image 是通用 opengraph-image.png，不能当作封面。
-            if (candidate && !/opengraph-image|logo|favicon|avatar/i.test(candidate)) image = candidate;
+            if (isGetavSeriesImageUsable(candidate)) image = candidate;
         }
         if (!image) {
             const images = [...doc.querySelectorAll('img[src],img[data-src],img[data-original]')].map((img) =>
                 img.getAttribute('data-src') || img.getAttribute('data-original') || img.getAttribute('src') || ''
-            ).filter((src) => src && !/logo|favicon|avatar/i.test(src));
-            // 优先使用真正的影片封面；其他非图标图片仅作旧版页面兜底。
-            image = images.find((src) => /\/images\/cover\//i.test(src)) || images[0] || '';
+            ).filter(isGetavSeriesImageUsable);
+            // 只取详情里的真实作品封面；不能拿页面第一张品牌图或通用图凑数。
+            image = images.find((src) => /\/images\/cover\//i.test(src)) || '';
         }
         try {
             image = image ? new URL(image, location.origin).href : '';
         } catch { image = ''; }
-        return { name, image };
+        if (!isGetavSeriesImageUsable(image)) image = '';
+
+        // 详情统计区直接提供全系列数量（例如“41 部作品”），不是当前分页的卡片数。
+        const stats = [...doc.querySelectorAll('.site-warm-stat-pill')].map((el) => el.textContent || '');
+        const countText = stats.find((text) => /部作品|部影片|\bvideos?\b|\bworks?\b/i.test(text)) ||
+            (doc.body ? doc.body.textContent || '' : '');
+        const countMatch = countText.match(/([\d,]+)\s*(?:部作品|部影片|\bvideos?\b|\bworks?\b)/i);
+        const parsedCount = countMatch ? Number(countMatch[1].replace(/,/g, '')) : NaN;
+        const count = Number.isInteger(parsedCount) && parsedCount >= 0 ? parsedCount : null;
+        return { name, image, count };
     }
 
     async function getavSeriesHttpGet(url) {
@@ -902,7 +917,11 @@
     async function fetchGetavSeriesMeta(id, fallbackName) {
         const key = getavSeriesCacheKey(id);
         const hit = cache[key];
-        if (hit && hit.zh && hit.image) return hit;
+        const hasCount = hit && Number.isInteger(hit.count) && hit.count >= 0;
+        const countMissFresh = hit && hit.countChecked && hit.countCheckedAt &&
+            Date.now() - hit.countCheckedAt < GETAV_SERIES_IMAGE_MISS_TTL;
+        const cachedImage = hit && isGetavSeriesImageUsable(hit.image) ? hit.image : '';
+        if (hit && hit.zh && cachedImage && (hasCount || countMissFresh)) return hit;
         try {
             const base = location.origin + '/' + getavSeriesLocale();
             const urls = [base + '/series/' + encodeURIComponent(id), base + '/series?id=' + encodeURIComponent(id)];
@@ -911,13 +930,17 @@
                 if (r.status < 200 || r.status >= 300) continue;
                 const meta = parseGetavSeriesMeta(r.text, fallbackName || (hit && hit.zh));
                 if (!meta) continue;
+                const now = Date.now();
                 cache[key] = {
                     zh: meta.name,
                     image: meta.image,
                     imageChecked: true,
-                    imageCheckedAt: Date.now(),
+                    imageCheckedAt: now,
+                    count: meta.count,
+                    countChecked: true,
+                    countCheckedAt: now,
                     zhSrc: 'getav-series',
-                    updatedAt: Date.now(),
+                    updatedAt: now,
                 };
                 return cache[key];
             }
@@ -2294,7 +2317,7 @@
     let getavSeriesRerun = false;
 
     function applyGetavSeriesImage(card, image) {
-        if (!card || !card.anchor || !image) return false;
+        if (!card || !card.anchor || !isGetavSeriesImageUsable(image)) return false;
         const anchor = card.anchor;
         let img = anchor.querySelector('img[data-mve-getav-series-image]');
         if (!img) {
@@ -2309,6 +2332,22 @@
         // 系列原卡片只有 film 图标占位；有封面后隐藏占位，避免上下两个圆圈。
         const placeholder = anchor.querySelector(':scope > div.rounded-full');
         if (placeholder) placeholder.style.setProperty('display', 'none', 'important');
+        return true;
+    }
+
+    function applyGetavSeriesCount(card, count) {
+        if (!card || !card.anchor || !Number.isInteger(count) || count < 0) return false;
+        const anchor = card.anchor;
+        // 原卡片第二行只有“系列”占位，直接复用来展示数量，不增加卡片高度。
+        let node = anchor.querySelector('[data-mve-getav-series-count]') || anchor.querySelector('p.truncate + p');
+        if (!node) {
+            node = document.createElement('p');
+            node.className = 'mve-getav-series-count';
+            const parent = card.name && card.name.parentElement ? card.name.parentElement : anchor;
+            parent.appendChild(node);
+        }
+        node.dataset.mveGetavSeriesCount = '1';
+        node.textContent = String(count) + ' 部影片';
         return true;
     }
 
@@ -2327,7 +2366,8 @@
             const hit = cache[key];
             if (hit && hit.zh) {
                 if (card.name.textContent.trim() !== hit.zh) setTextSafe(card.name, hit.zh);
-                if (hit.image) applyGetavSeriesImage(card, hit.image);
+                if (isGetavSeriesImageUsable(hit.image)) applyGetavSeriesImage(card, hit.image);
+                if (Number.isInteger(hit.count)) applyGetavSeriesCount(card, hit.count);
             }
 
             // 列表本身已是中文时先缓存标题，但不能因此跳过详情封面补抓。
@@ -2344,10 +2384,15 @@
             }
 
             const cached = cache[key];
-            const imageMissFresh = cached && cached.imageChecked && cached.imageCheckedAt &&
+            const hasImage = cached && isGetavSeriesImageUsable(cached.image);
+            // 只有真正“查过且无图”才走负缓存；旧版误存的 Logo/通用图必须立即补查。
+            const imageMissFresh = cached && !cached.image && cached.imageChecked && cached.imageCheckedAt &&
                 now - cached.imageCheckedAt < GETAV_SERIES_IMAGE_MISS_TTL;
-            if (cached && cached.zh && (cached.image || imageMissFresh)) return;
-            // 旧版 imageChecked 没有有效时间，统一重查一次；无图结果只缓存 24 小时。
+            const hasCount = cached && Number.isInteger(cached.count) && cached.count >= 0;
+            const countMissFresh = cached && cached.countChecked && cached.countCheckedAt &&
+                now - cached.countCheckedAt < GETAV_SERIES_IMAGE_MISS_TTL;
+            if (cached && cached.zh && (hasImage || imageMissFresh) && (hasCount || countMissFresh)) return;
+            // 旧缓存没有数量，补查一次；无图或无数量结果只缓存 24 小时。
             pending.push(card);
         });
         if (!pending.length) {
@@ -2365,6 +2410,7 @@
                         if (meta && document.contains(card.name)) {
                             if (card.name.textContent.trim() !== meta.zh) setTextSafe(card.name, meta.zh);
                             applyGetavSeriesImage(card, meta.image);
+                            if (Number.isInteger(meta.count)) applyGetavSeriesCount(card, meta.count);
                         }
                     } catch (e) {
                         // 单张卡片的 DOM 已被 React 替换等情况，不应中断整批系列。
@@ -2494,17 +2540,19 @@
             text-align: center !important;
             text-decoration: none !important;
         }
+        /* 系列封面：保持原始比例完整显示，只缩小、不裁剪。 */
         .mve-getav-series-image,
         #getav-sub-grid > div > a.flex img[data-mve-getav-series-image] {
             display: block !important;
-            width: 72px !important;
-            height: 72px !important;
-            margin: 2px auto 0 !important;
-            border-radius: 9999px !important;
-            object-fit: cover !important;
-            object-position: right center !important;
+            width: 100% !important;
+            height: auto !important;
+            max-height: 240px !important;
+            margin: 0 auto !important;
+            border-radius: 10px !important;
+            object-fit: contain !important;
+            object-position: center !important;
             border: 1px solid rgba(255,255,255,.10) !important;
-            background: rgba(255,255,255,.04) !important;
+            background: rgba(0,0,0,.22) !important;
         }
         /* 名字容器：显式撑满整行（不再依赖 flex 伸展，根治竖排问题） */
         #getav-sub-grid > div > a.flex > div.min-w-0 {
@@ -2796,31 +2844,54 @@
 
     /* ---------------- GetAV：返回列表页的页码/内容错位修复 ---------------- */
 
-    const getavListRecoveryState = { installed: false, reloadScheduled: false };
+    const getavListRecoveryState = { installed: false, reloadScheduled: false, pendingCheck: false, attempts: 0, timer: null };
 
     function getavListRouteInfo() {
         if (SITE !== 'getav') return null;
         const path = location.pathname.replace(/^\/[a-z]{2}(?:-[a-z]{2})?(?=\/)/i, '') || '/';
-        if (!/^\/(?:new-releases|latest|hot|library|search|stars(?:\/[^/]+)?)\/?$/i.test(path)) return null;
+        // 影片播放页不是列表；演员、系列、片商等详情本身仍是分页作品列表。
+        if (/^\/videos\/[^/]+\/?$/i.test(path)) return null;
         const params = new URLSearchParams(location.search);
+        const knownList = path === '/' || /^\/(?:new-releases|latest|hot|library|search|stars|series|makers|labels|genres|directors|codes|tags|categories)(?:\/[^/]+)?\/?$/i.test(path);
+        const profileList = /^\/profile\/(?:favorites|history|likes|subscriptions)\/?$/i.test(path);
+        // 所有显式带 page 的非播放页都按列表处理；常见首页即使没有 page 也先保存快照。
+        if (!knownList && !profileList && !params.has('page')) return null;
         const sort = params.get('sort') || '';
         const page = Math.max(1, Number.parseInt(params.get('page') || '1', 10) || 1);
-        return { path: path.toLowerCase(), sort, page, key: location.origin + path.toLowerCase() + '?sort=' + sort + '&page=' + page };
+        const keyParams = new URLSearchParams(location.search);
+        keyParams.set('page', String(page));
+        keyParams.sort();
+        // 保留搜索词和筛选条件，避免不同查询共用同一页码的快照。
+        return { path: path.toLowerCase(), sort, page, key: location.origin + path.toLowerCase() + '?' + keyParams.toString() };
     }
 
-    /** 只取去重后的前几部番号，避免统计链接/标题链接重复造成误判。 */
+    /** 实体首页只比较同类实体；实体详情和影片列表优先比较番号。 */
     function getavVisibleListSignature() {
-        const slugs = [];
-        document.querySelectorAll('a[href*="/videos/"]').forEach((anchor) => {
+        const mainAnchors = [...document.querySelectorAll('main a[href]')];
+        const anchors = mainAnchors.length ? mainAnchors : [...document.querySelectorAll('a[href]')];
+        const videos = [];
+        const entities = [];
+        anchors.forEach((anchor) => {
             try {
-                const path = new URL(anchor.href, location.origin).pathname;
-                const match = path.match(/\/videos\/([^/]+)\/?$/i);
+                const rawPath = new URL(anchor.href, location.origin).pathname;
+                const path = rawPath.replace(/^\/[a-z]{2}(?:-[a-z]{2})?(?=\/)/i, '');
+                const match = path.match(/^\/(videos|series|stars|makers|labels|genres|directors|codes|tags|categories)\/([^/]+)\/?$/i);
                 if (!match) return;
-                const slug = decodeURIComponent(match[1]).toLowerCase();
-                if (/\d/.test(slug) && !slugs.includes(slug)) slugs.push(slug);
+                const kind = match[1].toLowerCase();
+                const slug = decodeURIComponent(match[2]).toLowerCase();
+                if (!slug) return;
+                // 保持影片签名格式与旧版一致，升级后不会制造一次多余刷新。
+                const identity = kind === 'videos' ? slug : kind + ':' + slug;
+                const target = kind === 'videos' ? videos : entities;
+                if (!target.includes(identity)) target.push(identity);
             } catch { /* 忽略异常链接 */ }
         });
-        return slugs.slice(0, 8).join('|');
+        const currentPath = String(location.pathname || '/').replace(/^\/[a-z]{2}(?:-[a-z]{2})?(?=\/)/i, '');
+        const entityRoot = currentPath.match(/^\/(series|stars|makers|labels|genres|directors|codes|tags|categories)\/?$/i);
+        // 系列卡片也可能包含代表作影片链接，实体首页不能误用这些链接作指纹。
+        const primary = entityRoot ? entities.filter((id) => id.startsWith(entityRoot[1].toLowerCase() + ':'))
+            : (videos.length ? videos : entities);
+        return primary.slice(0, 8).join('|');
     }
 
     function readGetavListSnapshot(key) {
@@ -2836,7 +2907,7 @@
 
     function captureGetavListSnapshot() {
         const info = getavListRouteInfo();
-        if (!info) return false;
+        if (!info || getavListRecoveryState.pendingCheck) return false;
         const signature = getavVisibleListSignature();
         if (!signature) return false;
         try {
@@ -2849,9 +2920,24 @@
 
     function recoverGetavListAfterBack() {
         const info = getavListRouteInfo();
-        if (!info || getavListRecoveryState.reloadScheduled) return false;
+        if (getavListRecoveryState.reloadScheduled) return false;
+        if (!info) {
+            getavListRecoveryState.pendingCheck = false;
+            return false;
+        }
         const signature = getavVisibleListSignature();
-        if (!signature) return false;
+        if (!signature) {
+            // 客户端路由可能尚未渲染列表，短暂等待；期间禁止 Observer 覆盖原快照。
+            if (getavListRecoveryState.pendingCheck && getavListRecoveryState.attempts < 4) {
+                getavListRecoveryState.attempts++;
+                getavListRecoveryState.timer = setTimeout(recoverGetavListAfterBack, 350);
+            } else {
+                getavListRecoveryState.pendingCheck = false;
+            }
+            return false;
+        }
+        getavListRecoveryState.pendingCheck = false;
+        getavListRecoveryState.attempts = 0;
         const previous = readGetavListSnapshot(info.key);
         if (previous && previous.page === info.page && previous.sort === info.sort && previous.signature !== signature) {
             getavListRecoveryState.reloadScheduled = true;
@@ -2863,17 +2949,23 @@
         return false;
     }
 
+    function scheduleGetavListRecovery() {
+        if (getavListRecoveryState.reloadScheduled) return;
+        clearTimeout(getavListRecoveryState.timer);
+        getavListRecoveryState.pendingCheck = true;
+        getavListRecoveryState.attempts = 0;
+        // Next.js 先改 URL、随后异步替换列表；延迟到列表 DOM 稳定后再校验。
+        getavListRecoveryState.timer = setTimeout(recoverGetavListAfterBack, 650);
+    }
+
     function initGetavListRecovery() {
         if (getavListRecoveryState.installed) return;
         getavListRecoveryState.installed = true;
         // 首次进入先校验已有 sessionStorage 快照；正常首屏没有快照，不会刷新。
         recoverGetavListAfterBack();
-        window.addEventListener('popstate', () => {
-            // Next.js 先改 URL、随后异步替换列表；延迟到列表 DOM 稳定后再校验。
-            setTimeout(recoverGetavListAfterBack, 650);
-        });
+        window.addEventListener('popstate', scheduleGetavListRecovery);
         window.addEventListener('pageshow', (event) => {
-            if (event.persisted) setTimeout(recoverGetavListAfterBack, 650);
+            if (event.persisted) scheduleGetavListRecovery();
         });
     }
 
