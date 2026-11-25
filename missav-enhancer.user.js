@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.28
+// @version      4.0.30-dev.29
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Manko → Jable 繁中 → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -777,43 +777,56 @@
         }
     }
 
-    /** ---------------- GetAV 演员详情中文名源 ----------------
-     * 订阅页的演员卡片链接是 /stars/<数字>，详情 h1 直出中文名和日文名；
-     * 只取 h1 的中文部分，去掉“女优/男优”后缀后回写卡片。
+    /** ---------------- GetAV 系列详情中文名/图片源 ----------------
+     * 订阅页的系列卡片链接是 /series/<id>，详情 h1 直出本地化系列名称；
+     * 同时读取详情页 og:image，供订阅卡片补充封面。
      */
-    function getavStarCacheKey(id) {
-        return '@getav-star:' + String(id || '').toLowerCase();
+    function getavSeriesCacheKey(id) {
+        return '@getav-series:' + String(id || '').toLowerCase();
     }
 
-    function getavStarLocale() {
+    function getavSeriesLocale() {
         const match = location.pathname.match(/^\/([a-z]{2}(?:-[a-z]{2})?)(?:\/|$)/i);
         return match ? match[1].toLowerCase() : 'zh';
     }
 
-    function parseGetavStarName(html) {
+    function parseGetavSeriesMeta(html) {
         if (!html) return null;
         const doc = new DOMParser().parseFromString(html, 'text/html');
         const h1 = doc.querySelector('h1');
         if (!h1) return null;
-        const text = h1.textContent.replace(/\s+/g, ' ').trim();
-        const name = text.replace(/\s*(?:女优|女優|男优|男優|演员|演員)\s*$/i, '').trim();
-        return name && HAN_RE.test(name) ? name : null;
+        const name = h1.textContent.replace(/\s+/g, ' ').trim();
+        if (!name || !HAN_RE.test(name)) return null;
+        let image = '';
+        const og = doc.querySelector('meta[property="og:image"][content],meta[name="twitter:image"][content]');
+        if (og) image = og.getAttribute('content') || '';
+        if (!image) {
+            const candidate = [...doc.querySelectorAll('img[src]')].find((img) => {
+                const src = img.getAttribute('src') || '';
+                return /^https?:/i.test(src) && !/logo|favicon|avatar/i.test(src);
+            });
+            image = candidate ? candidate.getAttribute('src') || '' : '';
+        }
+        try {
+            image = image ? new URL(image, location.origin).href : '';
+        } catch { image = ''; }
+        return { name, image };
     }
 
-    async function fetchGetavStarName(id) {
-        const key = getavStarCacheKey(id);
+    async function fetchGetavSeriesMeta(id) {
+        const key = getavSeriesCacheKey(id);
         const hit = cache[key];
-        if (hit && hit.zh) return hit.zh;
+        if (hit && hit.zh && hit.image) return hit;
         try {
-            const url = location.origin + '/' + getavStarLocale() + '/stars/' + encodeURIComponent(id);
+            const url = location.origin + '/' + getavSeriesLocale() + '/series/' + encodeURIComponent(id);
             const r = await httpGet(url);
             if (r.status < 200 || r.status >= 300) return null;
-            const name = parseGetavStarName(r.text);
-            if (!name) return null;
-            cache[key] = { zh: name, zhSrc: 'getav-star', updatedAt: Date.now() };
-            return name;
+            const meta = parseGetavSeriesMeta(r.text);
+            if (!meta) return null;
+            cache[key] = { zh: meta.name, image: meta.image, imageChecked: true, zhSrc: 'getav-series', updatedAt: Date.now() };
+            return cache[key];
         } catch (e) {
-            log('GetAV 演员详情查询失败 ' + id, e);
+            log('GetAV 系列详情查询失败 ' + id, e);
             return null;
         }
     }
@@ -2076,12 +2089,12 @@
         if (!isGetavSubscriptionsPage()) return [];
         const out = [];
         document.querySelectorAll('#getav-sub-grid > div, div.divide-y > div.flex.flex-col').forEach((card) => {
-            const anchor = card.querySelector('a[href*="/stars/"]');
+            const anchor = card.querySelector('a[href*="/series/"]');
             if (!anchor) return;
             let id = '';
             try {
                 const path = new URL(anchor.href, location.origin).pathname;
-                const match = path.match(/\/stars\/([^/]+)\/?$/i);
+                const match = path.match(/\/series\/([^/]+)\/?$/i);
                 id = match ? decodeURIComponent(match[1]).toLowerCase() : '';
             } catch { /* 忽略异常链接 */ }
             if (!id) return;
@@ -2091,29 +2104,44 @@
         return out;
     }
 
-    let getavStarRunning = false;
-    let getavStarRerun = false;
+    let getavSeriesRunning = false;
+    let getavSeriesRerun = false;
+
+    function applyGetavSeriesImage(card, image) {
+        if (!card || !image) return;
+        let img = card.querySelector('img[data-mve-getav-series-image]');
+        if (!img) {
+            img = document.createElement('img');
+            img.dataset.mveGetavSeriesImage = '1';
+            img.alt = card.name ? card.name.textContent.trim() : '系列封面';
+            img.loading = 'lazy';
+            const anchor = card.anchor;
+            anchor.insertBefore(img, anchor.firstChild);
+        }
+        if (img.src !== image) img.src = image;
+    }
 
     async function enhanceGetavSubscriptionNames() {
         if (!config.titlesEnabled || !isGetavSubscriptionsPage()) return;
-        if (getavStarRunning) {
-            getavStarRerun = true;
+        if (getavSeriesRunning) {
+            getavSeriesRerun = true;
             return;
         }
         const cards = collectGetavSubscriptionCards().filter((card) => !card.hidden);
         if (!cards.length) return;
         const pending = [];
         cards.forEach((card) => {
-            const key = getavStarCacheKey(card.id);
+            const key = getavSeriesCacheKey(card.id);
             const hit = cache[key];
-            if (hit && hit.zh) {
+            if (hit && hit.zh && (hit.image || hit.imageChecked)) {
                 if (card.name.textContent.trim() !== hit.zh) setTextSafe(card.name, hit.zh);
+                if (hit.image) applyGetavSeriesImage(card, hit.image);
                 return;
             }
             // 页面本身已显示中文时直接缓存，避免重复请求详情。
             const current = card.name.textContent.trim();
             if (classifyTitle(current) === 'cn') {
-                cache[key] = { zh: current, zhSrc: 'getav-star-dom', updatedAt: Date.now() };
+                cache[key] = { zh: current, imageChecked: false, zhSrc: 'getav-series-dom', updatedAt: Date.now() };
                 return;
             }
             pending.push(card);
@@ -2122,19 +2150,22 @@
             saveCache(cache);
             return;
         }
-        getavStarRunning = true;
+        getavSeriesRunning = true;
         try {
             for (let i = 0; i < pending.length; i += 3) {
                 await Promise.all(pending.slice(i, i + 3).map(async (card) => {
-                    const name = await fetchGetavStarName(card.id);
-                    if (name && document.contains(card.name)) setTextSafe(card.name, name);
+                    const meta = await fetchGetavSeriesMeta(card.id);
+                    if (meta && document.contains(card.name)) {
+                        setTextSafe(card.name, meta.zh);
+                        applyGetavSeriesImage(card, meta.image);
+                    }
                 }));
                 saveCache(cache);
             }
         } finally {
-            getavStarRunning = false;
-            if (getavStarRerun) {
-                getavStarRerun = false;
+            getavSeriesRunning = false;
+            if (getavSeriesRerun) {
+                getavSeriesRerun = false;
                 setTimeout(enhanceGetavSubscriptionNames, 300);
             }
         }
@@ -2244,6 +2275,16 @@
             gap: 10px !important;
             text-align: center !important;
             text-decoration: none !important;
+        }
+        #getav-sub-grid > div > a.flex img[data-mve-getav-series-image] {
+            display: block !important;
+            width: 72px !important;
+            height: 72px !important;
+            margin: 2px auto 0 !important;
+            border-radius: 9999px !important;
+            object-fit: cover !important;
+            border: 1px solid rgba(255,255,255,.10) !important;
+            background: rgba(255,255,255,.04) !important;
         }
         /* 名字容器：显式撑满整行（不再依赖 flex 伸展，根治竖排问题） */
         #getav-sub-grid > div > a.flex > div.min-w-0 {
