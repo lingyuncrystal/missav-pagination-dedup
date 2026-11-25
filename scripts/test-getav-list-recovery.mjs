@@ -46,6 +46,15 @@ const makeRoute = new Function('SITE', 'location', 'URLSearchParams', `${routeSn
 }
 
 {
+    const route = makeRoute('getav', {
+        origin: 'https://getav.net', pathname: '/zh/stars/1476', search: '?page=2',
+    }, URLSearchParams);
+    const info = route();
+    assert(info.path === '/stars/1476' && info.page === 2, '演员作品详情第 2 页纳入返回恢复');
+    assert(info.key === 'https://getav.net/stars/1476?sort=&page=2', '演员作品分页快照键保留详情 id 与页码');
+}
+
+{
     const route = makeRoute('getav', { origin: 'https://getav.net', pathname: '/zh/videos/miaa-711', search: '' }, URLSearchParams);
     assert(route() === null, '详情页不触发列表恢复');
 }

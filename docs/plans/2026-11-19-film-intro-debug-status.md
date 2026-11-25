@@ -5,7 +5,7 @@
 ## 当前研发版本
 
 - 分支：`dev`
-- 最新功能版本：`4.0.30-dev.29`
+- 最新功能版本：`4.0.30-dev.30`
 - 正式版 `main` 未修改
 - 研发版地址：`https://raw.githubusercontent.com/lingyuncrystal/missav-pagination-dedup/dev/missav-enhancer.user.js`
 
@@ -35,6 +35,7 @@
 - dev.27 修复 GetAV 列表返回时 URL 页码与 React 内容错位：列表页按排序、页码保存首屏番号快照，监听 `popstate` 与 bfcache `pageshow`；仅当当前内容签名与同页快照不一致时重新加载当前 URL。
 - dev.28 将演员列表 `/stars` 纳入同一返回恢复；扩展 `getav.co`、`getav.live`、`getav.top`、`getav.me` 域名匹配；订阅页演员卡片从 `/stars/<id>` 详情 h1 读取中文名并缓存回写。
 - dev.29 修正订阅页目标：改为处理 `/series/<id>` 系列卡片，从系列详情 h1 读取中文名称，并从 `og:image` 或详情首张图片补回系列封面。
+- dev.30 将返回恢复扩展到 `/stars/<id>?page=<n>` 演员作品分页，例如 `/zh/stars/1476?page=2`。
 
 ## 当前待手机复测
 
@@ -49,6 +50,7 @@
 - 接近演员卡片后切换到“影片介绍”，确认已预载或正在加载同源文字与原比例图片；再切回“简介”，确认原演员卡片完整恢复。
 - 在 GetAV 新片列表翻到第 3 页，进入任意详情后用手机右滑返回，确认 URL 与列表内容都仍为第 3 页；正常返回时不应出现无条件刷新。
 - 打开 GetAV `/zh/stars` 翻到第 3 页，进入演员详情后返回，确认仍显示第 3 页演员列表。
+- 打开 GetAV `/zh/stars/1476?page=2`，进入任意作品详情后返回，确认演员作品列表仍停留在第 2 页。
 - 打开 `/zh/profile/subscriptions`，确认系列卡片名称显示中文并带有对应详情封面；翻页或重新进入页面后确认已缓存的名称和图片不再重复请求详情。
 - 分别在 `getav.co`、`getav.live`、`getav.top`、`getav.me` 打开列表和订阅页，确认脚本能注入。
 
