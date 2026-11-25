@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.34
+// @version      4.0.30-dev.36
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Manko → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -25,7 +25,7 @@
 // MissAV 经常更换域名后缀，用 @include 正则兜底所有 missav.<TLD> 变体
 // （正则要求 missav. 后紧跟纯字母 TLD 和 /，不会被 missav.evil.com 这类域名欺骗）
 // @include      /^https?:\/\/([^/]*\.)?missav\.[a-z]{2,}\//
-// @run-at       document-idle
+// @run-at       document-start
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_xmlhttpRequest
@@ -428,6 +428,70 @@
     }
 
     /* ================================================================
+     * 模块四-b getav-no-autoplay：GetAV 视频详情禁止自动播放
+     * Vidstack 可能通过 player.play() 自动播放，仅删除 autoplay 属性不够。
+     * document-start 时装好捕获监听；非用户手势触发的 play/playing 立即暂停。
+     * 用户主动点击/按键操作播放器后，把对应 video 加入白名单，后续缓冲恢复、
+     * 暂停后继续播放均不受影响。只监听，不在 React 水合前改 DOM。
+     * ================================================================ */
+
+    function isGetavVideoDetailPage() {
+        return SITE === 'getav' && /^\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?videos\/[^/]+\/?$/i.test(location.pathname);
+    }
+
+    const getavManualPlayVideos = new WeakSet();
+    let getavManualPlayer = null;
+    let getavManualPlayAt = 0;
+    let getavNoAutoplayInstalled = false;
+
+    function getavPlayerRoot(target) {
+        if (!target || typeof target.closest !== 'function') return null;
+        return target.closest('[data-media-player]') || (target.tagName === 'VIDEO' ? target : null);
+    }
+
+    function noteGetavManualPlay(event) {
+        if (!config.getavNoAutoplay || !isGetavVideoDetailPage() || event.isTrusted === false) return;
+        if (event.type === 'keydown' && !['Enter', ' '].includes(event.key)) return;
+        const player = getavPlayerRoot(event.target);
+        if (!player) return;
+        getavManualPlayer = player;
+        getavManualPlayAt = Date.now();
+    }
+
+    function guardGetavAutoplay(video, event) {
+        if (!config.getavNoAutoplay || !isGetavVideoDetailPage()) return;
+        if (!video || video.tagName !== 'VIDEO' || isPreviewVideo(video)) return;
+        const player = getavPlayerRoot(video);
+        if (player && player === getavManualPlayer && Date.now() - getavManualPlayAt < 15000) {
+            getavManualPlayVideos.add(video);
+        }
+        video.autoplay = false;
+        if (typeof video.removeAttribute === 'function') video.removeAttribute('autoplay');
+        if (getavManualPlayVideos.has(video)) return;
+        if (!video.paused && typeof video.pause === 'function') video.pause();
+        if (event) {
+            // play 不可取消，但停止继续传播可避免播放器把这次自动播放当成用户播放。
+            if (typeof event.preventDefault === 'function') event.preventDefault();
+            if (typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation();
+        }
+    }
+
+    function applyGetavNoAutoplay() {
+        if (!config.getavNoAutoplay || !isGetavVideoDetailPage()) return;
+        document.querySelectorAll('video').forEach((video) => guardGetavAutoplay(video));
+    }
+
+    function initGetavNoAutoplay() {
+        if (getavNoAutoplayInstalled) return;
+        getavNoAutoplayInstalled = true;
+        document.addEventListener('pointerdown', noteGetavManualPlay, true);
+        document.addEventListener('keydown', noteGetavManualPlay, true);
+        document.addEventListener('play', (event) => guardGetavAutoplay(event.target, event), true);
+        document.addEventListener('playing', (event) => guardGetavAutoplay(event.target, event), true);
+        window.addEventListener('pageshow', applyGetavNoAutoplay);
+    }
+
+    /* ================================================================
      * 模块五 titles：标题修正（中文标题链：缓存 → GetAV → Manko → 大模型）
      * 大模型服务商预设见 PROVIDERS：选中即自动填好地址与默认模型，
      * 用户只需粘贴 Key；「自定义」保留手填入口（OpenAI 兼容接口）。
@@ -459,6 +523,7 @@
         dedupEnabled: true, // 翻页去重总开关（保存后刷新页面生效）
         gridEnabled: true, // 片单网格化总开关（保存后刷新页面生效）
         previewExclusive: true, // 预览独占：新预览播放时自动暂停上一个（保存后刷新页面生效）
+        getavNoAutoplay: true, // GetAV 视频详情：禁止自动播放，用户主动播放后不再拦截
     };
 
     const hasGM = typeof GM_setValue === 'function' && typeof GM_getValue === 'function';
@@ -778,9 +843,12 @@
     }
 
     /** ---------------- GetAV 系列详情中文名/图片源 ----------------
-     * 订阅页的系列卡片链接是 /series/<id>，详情 h1 直出本地化系列名称；
-     * 同时读取详情页 og:image，供订阅卡片补充封面。
+     * 订阅页的系列卡片链接是 /series/<id>，详情 h1 直出本地化系列名称。
+     * 系列详情没有专属 og:image（只是全站通用图），封面改取详情首部作品缩略图。
+     * 在 GetAV 站内优先用同源 fetch：携带当前登录态，也避免 GM_xhr 丢失 Cookie/会话。
      */
+    const GETAV_SERIES_IMAGE_MISS_TTL = 24 * 3600 * 1000;
+
     function getavSeriesCacheKey(id) {
         return '@getav-series:' + String(id || '').toLowerCase();
     }
@@ -790,13 +858,16 @@
         return match ? match[1].toLowerCase() : 'zh';
     }
 
-    function parseGetavSeriesMeta(html) {
+    function parseGetavSeriesMeta(html, fallbackName) {
         if (!html) return null;
         const doc = new DOMParser().parseFromString(html, 'text/html');
-        const h1 = doc.querySelector('h1');
-        if (!h1) return null;
-        const name = h1.textContent.replace(/\s+/g, ' ').trim();
-        if (!name || !HAN_RE.test(name)) return null;
+        const heading = doc.querySelector('h1');
+        const headingName = heading ? heading.textContent.replace(/\s+/g, ' ').trim() : '';
+        const fallback = String(fallbackName || '').replace(/\s+/g, ' ').trim();
+        const name = headingName && HAN_RE.test(headingName) ? headingName
+            : (fallback && HAN_RE.test(fallback) ? fallback : '');
+        if (!name) return null;
+
         let image = '';
         const og = doc.querySelector('meta[property="og:image"][content],meta[name="twitter:image"][content]');
         if (og) {
@@ -805,11 +876,11 @@
             if (candidate && !/opengraph-image|logo|favicon|avatar/i.test(candidate)) image = candidate;
         }
         if (!image) {
-            const candidate = [...doc.querySelectorAll('img[src],img[data-src],img[data-original]')].find((img) => {
-                const src = img.getAttribute('data-src') || img.getAttribute('data-original') || img.getAttribute('src') || '';
-                return src && !/logo|favicon|avatar/i.test(src);
-            });
-            image = candidate ? (candidate.getAttribute('data-src') || candidate.getAttribute('data-original') || candidate.getAttribute('src') || '') : '';
+            const images = [...doc.querySelectorAll('img[src],img[data-src],img[data-original]')].map((img) =>
+                img.getAttribute('data-src') || img.getAttribute('data-original') || img.getAttribute('src') || ''
+            ).filter((src) => src && !/logo|favicon|avatar/i.test(src));
+            // 优先使用真正的影片封面；其他非图标图片仅作旧版页面兜底。
+            image = images.find((src) => /\/images\/cover\//i.test(src)) || images[0] || '';
         }
         try {
             image = image ? new URL(image, location.origin).href : '';
@@ -817,7 +888,18 @@
         return { name, image };
     }
 
-    async function fetchGetavSeriesMeta(id) {
+    async function getavSeriesHttpGet(url) {
+        // 已实测同源 fetch 能取得完整 SSR HTML；优先复用页面会话，失败再走 GM_xhr。
+        try {
+            const response = await fetch(url, { credentials: 'same-origin', headers: { Accept: 'text/html' } });
+            return { status: response.status, text: await response.text() };
+        } catch (e) {
+            log('GetAV 系列同源请求失败，改用 GM_xhr ' + url, e);
+            return httpGet(url);
+        }
+    }
+
+    async function fetchGetavSeriesMeta(id, fallbackName) {
         const key = getavSeriesCacheKey(id);
         const hit = cache[key];
         if (hit && hit.zh && hit.image) return hit;
@@ -825,11 +907,18 @@
             const base = location.origin + '/' + getavSeriesLocale();
             const urls = [base + '/series/' + encodeURIComponent(id), base + '/series?id=' + encodeURIComponent(id)];
             for (const url of urls) {
-                const r = await httpGet(url);
+                const r = await getavSeriesHttpGet(url);
                 if (r.status < 200 || r.status >= 300) continue;
-                const meta = parseGetavSeriesMeta(r.text);
+                const meta = parseGetavSeriesMeta(r.text, fallbackName || (hit && hit.zh));
                 if (!meta) continue;
-                cache[key] = { zh: meta.name, image: meta.image, imageChecked: true, zhSrc: 'getav-series', updatedAt: Date.now() };
+                cache[key] = {
+                    zh: meta.name,
+                    image: meta.image,
+                    imageChecked: true,
+                    imageCheckedAt: Date.now(),
+                    zhSrc: 'getav-series',
+                    updatedAt: Date.now(),
+                };
                 return cache[key];
             }
             return null;
@@ -1774,6 +1863,7 @@
             '<label style="display:flex;align-items:center;gap:6px;margin:6px 0"><input id="mve-dedup" type="checkbox"> 启用翻页去重（刷新生效）</label>' +
             '<label style="display:flex;align-items:center;gap:6px;margin:6px 0"><input id="mve-grid" type="checkbox"> 启用片单网格化（刷新生效）</label>' +
             '<label style="display:flex;align-items:center;gap:6px;margin:6px 0"><input id="mve-preview" type="checkbox"> 预览独占：同时只播放一个预览视频（刷新生效）</label>' +
+            '<label style="display:flex;align-items:center;gap:6px;margin:6px 0"><input id="mve-getav-no-autoplay" type="checkbox"> 禁止视频详情自动播放（手动点击仍可播放）</label>' +
             '</div>' +
             '</details>' +
             '<details style="border-top:1px solid #2e3440">' +
@@ -1811,7 +1901,10 @@
                 if (label) label.style.display = 'none';
             });
         }
-        if (SITE === 'getav') {
+        if (SITE !== 'getav') {
+            const label = panel.querySelector('#mve-getav-no-autoplay').closest('label');
+            if (label) label.style.display = 'none';
+        } else {
             const verify = panel.querySelector('#mve-getav-verify');
             if (verify) verify.style.display = 'none';
         }
@@ -1839,10 +1932,12 @@
                 dedupEnabled: panel.querySelector('#mve-dedup').checked,
                 gridEnabled: panel.querySelector('#mve-grid').checked,
                 previewExclusive: panel.querySelector('#mve-preview').checked,
+                getavNoAutoplay: panel.querySelector('#mve-getav-no-autoplay').checked,
                 showButton: panel.querySelector('#mve-showbtn').checked,
             };
             btn.style.display = config.showButton ? '' : 'none';
             saveConfig(config);
+            applyGetavNoAutoplay();
             lastError = null;
             msg('已保存' + (!config.apiKey ? '（未填 Key：GetAV 精校 / Jable 中文照常使用，未收录的保持原标题）' : ''));
             togglePanel();
@@ -2065,6 +2160,7 @@
             panel.querySelector('#mve-dedup').checked = config.dedupEnabled;
             panel.querySelector('#mve-grid').checked = config.gridEnabled;
             panel.querySelector('#mve-preview').checked = config.previewExclusive;
+            panel.querySelector('#mve-getav-no-autoplay').checked = config.getavNoAutoplay;
             panel.querySelector('#mve-showbtn').checked = config.showButton;
             if (lastError) msg('上次出错：' + lastError);
             else msg(!config.apiKey ? '未填 API Key：只用 GetAV / Jable 免费中文源，未收录的保持原标题' : '');
@@ -2085,6 +2181,86 @@
      */
     function isGetavSubscriptionsPage() {
         return SITE === 'getav' && /\/profile\/subscriptions/.test(location.pathname);
+    }
+
+    /* 订阅标签保存在 URL 中：详情返回、整页重载、直接分享链接都能恢复。
+     * 用 replaceState 而不是 pushState，切换标签不会给浏览器返回键增加历史层级。 */
+    const GETAV_SUBSCRIPTION_TAB_LABELS = {
+        actors: '演员',
+        makers: '制作商',
+        labels: '发行商',
+        genres: '类型',
+        series: '系列',
+        directors: '导演',
+        codes: '番号',
+    };
+
+    function getavSubscriptionTabKey(button) {
+        const text = String(button && button.textContent || '').replace(/\s+/g, '');
+        return Object.keys(GETAV_SUBSCRIPTION_TAB_LABELS).find((key) =>
+            text.startsWith(GETAV_SUBSCRIPTION_TAB_LABELS[key])
+        ) || '';
+    }
+
+    function collectGetavSubscriptionTabButtons() {
+        if (!isGetavSubscriptionsPage()) return [];
+        return [...document.querySelectorAll('button,[role="tab"]')].filter((button) =>
+            !!getavSubscriptionTabKey(button)
+        );
+    }
+
+    function isGetavSubscriptionTabActive(button) {
+        return button.getAttribute('aria-selected') === 'true' ||
+            button.getAttribute('aria-pressed') === 'true' ||
+            button.getAttribute('data-state') === 'active' ||
+            String(button.className || '').includes('bg-white/[0.08]');
+    }
+
+    function saveGetavSubscriptionTab(key) {
+        if (!isGetavSubscriptionsPage() || !GETAV_SUBSCRIPTION_TAB_LABELS[key]) return;
+        const url = new URL(location.href);
+        if (key === 'actors') url.searchParams.delete('tab');
+        else url.searchParams.set('tab', key);
+        if (url.href !== location.href) history.replaceState(history.state, '', url.href);
+    }
+
+    function restoreGetavSubscriptionTab() {
+        if (!isGetavSubscriptionsPage()) return false;
+        const buttons = collectGetavSubscriptionTabButtons();
+        if (!buttons.length) return false;
+        const requested = new URL(location.href).searchParams.get('tab') || 'actors';
+        const key = GETAV_SUBSCRIPTION_TAB_LABELS[requested] ? requested : 'actors';
+        const active = buttons.find(isGetavSubscriptionTabActive);
+        if (active && getavSubscriptionTabKey(active) === key) return true;
+        const target = buttons.find((button) => getavSubscriptionTabKey(button) === key);
+        if (!target) return false;
+        target.click();
+        return true;
+    }
+
+    function initGetavSubscriptionTabTracking() {
+        document.addEventListener('click', (event) => {
+            if (!isGetavSubscriptionsPage()) return;
+            const target = event.target && event.target.closest ? event.target.closest('button,[role="tab"]') : null;
+            const key = getavSubscriptionTabKey(target);
+            if (!key) return;
+            // 捕获阶段先保存，随后无论 React 是否重渲染，返回位置都已记录。
+            saveGetavSubscriptionTab(key);
+            if (key === 'series') {
+                setTimeout(() => {
+                    makeGetavThreeColumns();
+                    enhanceGetavSubscriptionNames();
+                }, 350);
+            }
+        }, true);
+        const restore = () => setTimeout(() => {
+            if (!restoreGetavSubscriptionTab()) return;
+            makeGetavThreeColumns();
+            enhanceGetavSubscriptionNames();
+        }, 150);
+        window.addEventListener('popstate', restore);
+        window.addEventListener('pageshow', restore);
+        restore();
     }
 
     function collectGetavSubscriptionCards() {
@@ -2141,20 +2317,33 @@
         const cards = collectGetavSubscriptionCards().filter((card) => !card.hidden);
         if (!cards.length) return;
         const pending = [];
+        const now = Date.now();
         cards.forEach((card) => {
             const key = getavSeriesCacheKey(card.id);
             const hit = cache[key];
-            if (hit && hit.zh && (hit.image || hit.imageChecked)) {
+            if (hit && hit.zh) {
                 if (card.name.textContent.trim() !== hit.zh) setTextSafe(card.name, hit.zh);
                 if (hit.image) applyGetavSeriesImage(card, hit.image);
-                return;
             }
-            // 页面本身已显示中文时直接缓存，避免重复请求详情。
+
+            // 列表本身已是中文时先缓存标题，但不能因此跳过详情封面补抓。
             const current = card.name.textContent.trim();
-            if (classifyTitle(current) === 'cn') {
-                cache[key] = { zh: current, imageChecked: false, zhSrc: 'getav-series-dom', updatedAt: Date.now() };
-                return;
+            if (!hit || !hit.zh) {
+                if (classifyTitle(current) === 'cn') {
+                    cache[key] = Object.assign({}, hit || {}, {
+                        zh: current,
+                        imageChecked: false,
+                        zhSrc: 'getav-series-dom',
+                        updatedAt: now,
+                    });
+                }
             }
+
+            const cached = cache[key];
+            const imageMissFresh = cached && cached.imageChecked && cached.imageCheckedAt &&
+                now - cached.imageCheckedAt < GETAV_SERIES_IMAGE_MISS_TTL;
+            if (cached && cached.zh && (cached.image || imageMissFresh)) return;
+            // 旧版 imageChecked 没有有效时间，统一重查一次；无图结果只缓存 24 小时。
             pending.push(card);
         });
         if (!pending.length) {
@@ -2165,9 +2354,11 @@
         try {
             for (let i = 0; i < pending.length; i += 3) {
                 await Promise.all(pending.slice(i, i + 3).map(async (card) => {
-                    const meta = await fetchGetavSeriesMeta(card.id);
+                    const key = getavSeriesCacheKey(card.id);
+                    const hit = cache[key];
+                    const meta = await fetchGetavSeriesMeta(card.id, hit && hit.zh);
                     if (meta && document.contains(card.name)) {
-                        setTextSafe(card.name, meta.zh);
+                        if (card.name.textContent.trim() !== meta.zh) setTextSafe(card.name, meta.zh);
                         applyGetavSeriesImage(card, meta.image);
                     }
                 }));
@@ -2544,6 +2735,7 @@
     function initGetavUi() {
         injectGetavStyles();
         initGetavListRecovery();
+        initGetavSubscriptionTabTracking();
         let timer = null;
         let pendingRoots = []; // 收集新增节点：只扫变化子树，避免每次变动都全文档强制同步布局
         const schedule = () => {
@@ -2556,6 +2748,8 @@
                     fillGetavFromTitle(root);
                     expandGetavTruncated(root);
                 }
+                // Next.js 客户端进入订阅页不触发 pageshow，这里也按 URL 恢复标签。
+                restoreGetavSubscriptionTab();
                 makeGetavThreeColumns();
                 ensureGetavActorTabs();
                 captureGetavListSnapshot();
@@ -2581,13 +2775,6 @@
             if (hasAdded) schedule();
         }).observe(document.body, { childList: true, subtree: true });
         window.addEventListener('load', schedule);
-        // 订阅页的“演员/系列”是同页切换，不一定触发新增节点；切到系列后主动重扫。
-        document.addEventListener('click', (event) => {
-            if (!isGetavSubscriptionsPage()) return;
-            const target = event.target && event.target.closest ? event.target.closest('button,[role="tab"]') : null;
-            if (!target || !/系列/.test(target.textContent || '')) return;
-            setTimeout(enhanceGetavSubscriptionNames, 350);
-        }, true);
     }
 
     /* ---------------- GetAV：返回列表页的页码/内容错位修复 ---------------- */
@@ -3555,9 +3742,11 @@
             GM_registerMenuCommand(menuLabel, togglePanel);
         }
         // GetAV 是 React 应用：水合前任何 DOM 写入都会触发 #418 并被整棵重建，
-        // 因此设置入口、界面增强、标题链、Observer 全部等水合完成后再启动
+        // 因此设置入口、界面增强、标题链、Observer 全部等水合完成后再启动。
+        // 自动播放拦截已在 document-start 安装，这里在水合后才清理已有播放器状态。
         if (SITE === 'getav') {
             whenHydrated(() => {
+                safe('getav-no-autoplay-apply', applyGetavNoAutoplay);
                 safe('settings-ui', buildUI);
                 if (!btn) buildFallbackButton(); // 面板没建出来 → 放兜底按钮报告原因
                 safe('getav-ui', initGetavUi);
@@ -3582,6 +3771,9 @@
         scheduleTitleRuns();
         safe('observer', startObserver);
     }
+
+    // 此入口不依赖 body，也不写 DOM；必须在播放器开始加载前安装。
+    if (SITE === 'getav') safe('getav-no-autoplay', initGetavNoAutoplay);
 
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
