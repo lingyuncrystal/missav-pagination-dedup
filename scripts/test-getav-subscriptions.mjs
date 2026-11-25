@@ -23,6 +23,11 @@ assert(/\*:\/\/getav\.co\//.test(source) && /\*:\/\/getav\.live\//.test(source) 
 assert(/getav\\\.\(\?:net\|co\|live\|top\|me\)/.test(source), '站点识别覆盖全部 GetAV 域名');
 const seriesImageCss = between('        .mve-getav-series-image,', '        /* 名字容器');
 assert(/object-position:\s*right center\s*!important/.test(seriesImageCss), '系列圆形封面优先显示原图右侧区域');
+const touchEditCss = between('        /* 触屏设备没有 hover', '        /* ============ 订阅页：网格');
+assert(/@media \(hover: none\), \(pointer: coarse\)/.test(touchEditCss) &&
+    /li\.relative\.group > button\.absolute\.opacity-0/.test(touchEditCss) &&
+    /opacity:\s*1\s*!important/.test(touchEditCss),
+    '触屏设备常显普通收藏列表编辑按钮');
 
 const parserSnippet = between('    function parseGetavSeriesMeta(html, fallbackName)', '    async function getavSeriesHttpGet');
 const parse = new Function('DOMParser', 'HAN_RE', 'location', `${parserSnippet}; return parseGetavSeriesMeta;`);
