@@ -84,6 +84,38 @@ const document = { querySelectorAll: () => [anchor] };
 const cards = collect('getav', { pathname: '/zh/profile/subscriptions', origin: 'https://getav.net' }, document, () => ({ display: 'block' }))();
 assert(cards.length === 1 && cards[0].id === '440' && cards[0].name.textContent === '制服 Series', '订阅卡片提取系列详情 id 与名称节点');
 
+const applyImageSnippet = between('    function applyGetavSeriesImage(card, image)', '    async function enhanceGetavSubscriptionNames');
+const applyImage = new Function('document', `${applyImageSnippet}; return applyGetavSeriesImage;`);
+const injected = [];
+const placeholderStyles = [];
+const placeholder = { style: { setProperty: (...args) => placeholderStyles.push(args) } };
+const imageAnchor = {
+    firstChild: {},
+    querySelector(selector) {
+        if (selector === 'img[data-mve-getav-series-image]') return injected[0] || null;
+        if (selector === ':scope > div.rounded-full') return placeholder;
+        return null;
+    },
+    insertBefore(img) { injected.push(img); },
+};
+const imageDocument = {
+    createElement() {
+        return {
+            dataset: {},
+            attrs: {},
+            getAttribute(name) { return this.attrs[name] || null; },
+            setAttribute(name, value) { this.attrs[name] = value; },
+        };
+    },
+};
+const imageCard = { anchor: imageAnchor, name: { textContent: '详情中文标题' } };
+const applied = applyImage(imageDocument)(imageCard, cover);
+assert(applied === true && injected.length === 1, '真实封面函数直接向卡片链接插入图片');
+assert(injected[0].getAttribute('src') === cover && injected[0].alt === '详情中文标题', '真实封面函数写入图片地址和替代文本');
+assert(placeholderStyles.some(([name, value]) => name === 'display' && value === 'none'), '真实封面函数隐藏原胶片图标占位');
+applyImage(imageDocument)(imageCard, cover);
+assert(injected.length === 1, '重复应用封面不会重复插入图片');
+
 const enhanceSnippet = between('    async function enhanceGetavSubscriptionNames()', '    /** querySelectorAll 的补充');
 const makeEnhance = new Function('config', 'isGetavSubscriptionsPage', 'collectGetavSubscriptionCards',
     'cache', 'getavSeriesCacheKey', 'setTextSafe', 'applyGetavSeriesImage', 'classifyTitle',

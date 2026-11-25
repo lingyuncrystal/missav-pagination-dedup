@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.36
+// @version      4.0.30-dev.37
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Manko → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -2294,18 +2294,22 @@
     let getavSeriesRerun = false;
 
     function applyGetavSeriesImage(card, image) {
-        if (!card || !image) return;
-        let img = card.querySelector('img[data-mve-getav-series-image]');
+        if (!card || !card.anchor || !image) return false;
+        const anchor = card.anchor;
+        let img = anchor.querySelector('img[data-mve-getav-series-image]');
         if (!img) {
             img = document.createElement('img');
             img.dataset.mveGetavSeriesImage = '1';
             img.className = 'mve-getav-series-image';
-            img.alt = card.name ? card.name.textContent.trim() : '系列封面';
             img.loading = 'lazy';
-            const anchor = card.anchor;
             anchor.insertBefore(img, anchor.firstChild);
         }
+        img.alt = card.name ? card.name.textContent.trim() : '系列封面';
         if (img.getAttribute('src') !== image) img.setAttribute('src', image);
+        // 系列原卡片只有 film 图标占位；有封面后隐藏占位，避免上下两个圆圈。
+        const placeholder = anchor.querySelector(':scope > div.rounded-full');
+        if (placeholder) placeholder.style.setProperty('display', 'none', 'important');
+        return true;
     }
 
     async function enhanceGetavSubscriptionNames() {
@@ -2354,12 +2358,17 @@
         try {
             for (let i = 0; i < pending.length; i += 3) {
                 await Promise.all(pending.slice(i, i + 3).map(async (card) => {
-                    const key = getavSeriesCacheKey(card.id);
-                    const hit = cache[key];
-                    const meta = await fetchGetavSeriesMeta(card.id, hit && hit.zh);
-                    if (meta && document.contains(card.name)) {
-                        if (card.name.textContent.trim() !== meta.zh) setTextSafe(card.name, meta.zh);
-                        applyGetavSeriesImage(card, meta.image);
+                    try {
+                        const key = getavSeriesCacheKey(card.id);
+                        const hit = cache[key];
+                        const meta = await fetchGetavSeriesMeta(card.id, hit && hit.zh);
+                        if (meta && document.contains(card.name)) {
+                            if (card.name.textContent.trim() !== meta.zh) setTextSafe(card.name, meta.zh);
+                            applyGetavSeriesImage(card, meta.image);
+                        }
+                    } catch (e) {
+                        // 单张卡片的 DOM 已被 React 替换等情况，不应中断整批系列。
+                        log('GetAV 系列卡片回写失败 ' + card.id, e);
                     }
                 }));
                 saveCache(cache);
