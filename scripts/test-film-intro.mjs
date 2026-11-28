@@ -127,7 +127,7 @@ const lazySnippet = between('    function startJableFilmIntroLazyLoad(', '    fu
         disconnect() { this.disconnected = true; }
     }
     const startLazy = new Function(
-        'jableFilmIntroState', 'IntersectionObserver', 'load7mmtvIntro', 'renderFilmIntro', 'renderJableFilmIntroError',
+        'jableFilmIntroState', 'IntersectionObserver', 'loadNetflavIntro', 'renderFilmIntro', 'renderJableFilmIntroError',
         `${lazySnippet}; return startJableFilmIntroLazyLoad;`
     )(
         state,
@@ -139,7 +139,7 @@ const lazySnippet = between('    function startJableFilmIntroLazyLoad(', '    fu
     const card = {};
     const body = { textContent: '' };
     startLazy(card, body, 'jur-857');
-    assert(requestCount === 0, '卡片未进入视口前不请求 7mmtv');
+    assert(requestCount === 0, '卡片未进入视口前不请求 netflav');
     assert(instance.node === card && instance.options.rootMargin === '300px 0px', '提前 300px 观察影片介绍卡片');
     instance.callback([{ isIntersecting: true }]);
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -151,7 +151,7 @@ const lazySnippet = between('    function startJableFilmIntroLazyLoad(', '    fu
     let attempts = 0;
     let retry = null;
     const startLazy = new Function(
-        'jableFilmIntroState', 'IntersectionObserver', 'load7mmtvIntro', 'renderFilmIntro', 'renderJableFilmIntroError',
+        'jableFilmIntroState', 'IntersectionObserver', 'loadNetflavIntro', 'renderFilmIntro', 'renderJableFilmIntroError',
         `${lazySnippet}; return startJableFilmIntroLazyLoad;`
     )(
         state,

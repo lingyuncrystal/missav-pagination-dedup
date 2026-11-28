@@ -1,5 +1,14 @@
 # Changelog
 
+## [4.0.30-dev.43] - 2026-11-28
+
+- **影片介绍数据源从 7mmtv 换成 netflav.com**：MissAV「影片介绍」Tab、Jable 影片介绍卡片、GetAV 演员卡片「影片介绍」Tab 三站共用同一数据层，改为在 netflav 按番号搜索（`/search?type=all&keyword=`）定位 `videoId`，再从详情页 `/video?id=` 取介绍正文与预览图；`@connect` 同步从 `7mmtv.sx` 改为 `netflav.com`。
+- **番号匹配改为精确比对**：netflav 搜索是模糊匹配（查 `ABP-123` 会返回 `ABP-113`、`ABP-143` 等），因此把 `code`/`uCode` 归一化（忽略大小写、连字符、下划线、空格）后精确比对，命中不到宁可显示「未找到」也不认错片；`FC2-PPV 4507566` 这类用空格分隔的番号也能命中。
+- **版本后缀统一剥离**：新增 `baseCodeFromSlug()`，MissAV 的 `-chinese-subtitle`、`-uncensored-leak` 等 URL 后缀在 `slugFromHref` 和影片介绍查询前统一剥掉，避免带后缀的番号查不到介绍。
+- **删除 7mmtv 专用 POST 通道**：`httpPost` 只服务于 7mmtv 的搜索表单，已随数据源切换一并移除。
+- **新增数据层单测** `scripts/test-film-intro-source.mjs`：覆盖番号归一化、后缀剥离、精确匹配（拒绝模糊结果）、`__NEXT_DATA__` 解析与 DOM 兜底、搜索→详情→缓存链路，并断言三站均已切到 netflav。
+- **真站实装验证通过（Chrome + ScriptCat）**：MissAV「影片介绍」Tab 13 张图、Jable 滚动加载 10 张图、GetAV 演员卡片 Tab 13 张图全部加载成功且来源指向 netflav；netflav 未收录的 `mide-001` 正确显示「未找到」；三站标题增强与设置入口无回归。
+
 ## [4.0.30-dev.34] - 2026-11-25
 
 - **修复订阅系列切换后的批量处理与封面**：订阅页点击“系列”后主动重扫动态卡片；忽略详情页通用 `opengraph-image.png`，改用系列详情中的实际封面图。
