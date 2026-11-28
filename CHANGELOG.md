@@ -1,5 +1,14 @@
 # Changelog
 
+## [4.0.30-dev.44] - 2026-11-28
+
+- **影片介绍补上 7mmtv 兜底**：netflav 对 FC2 / 老番号收录不全，`fetchFilmIntro()` 改为「先 netflav，未收录再走 7mmtv」；7mmtv 继续沿用原来的中文详情优先、英文回退解析（文字取 `.video-introduction-images-text`，图片取 `#fullvideo_showallcg`），部分番号只有图无字时只展示图片。
+- **来源可区分**：两个数据源都带 `source` 标记（`netflav` / `7mmtv`），面板底部链接分别显示「来源：netflav.com（影片详情）」或「来源：7mmtv.sx（中文/英文详情）」；两源都未收录时提示「netflav 与 7mmtv 均未找到对应的影片介绍。」
+- **失败语义分层**：netflav 请求失败但 7mmtv 命中 → 正常展示；两源都请求失败 → 抛出合并错误（同时包含两边原因）供界面显示重试；只有两源都明确未收录才显示「未找到」，不会把网络故障误判成没有介绍。
+- **元数据与命名**：`@connect 7mmtv.sx` 加回（与 `netflav.com` 并存），`loadNetflavIntro` 更名 `loadFilmIntro`（三站统一入口不再绑定单一数据源）。
+- **单测扩展**：`scripts/test-film-intro-source.mjs` 增至 30 条断言，新增 7mmtv 解析、兜底顺序、中英文回退、两源都未收录、两源都失败等用例。
+- **过滤失效占位图**：真站验证发现不少老番号在 7mmtv 上的 DMM 原图已下架，会 302 到 90×122 的 `now_printing.jpg`，按原比例拉满会变成一整块空白；现在图片加载后按 `naturalWidth < 200` 剔除，整组都失效时显示「该来源的影片介绍图片已失效，暂时无法显示。」，不再出现白块。
+
 ## [4.0.30-dev.43] - 2026-11-28
 
 - **影片介绍数据源从 7mmtv 换成 netflav.com**：MissAV「影片介绍」Tab、Jable 影片介绍卡片、GetAV 演员卡片「影片介绍」Tab 三站共用同一数据层，改为在 netflav 按番号搜索（`/search?type=all&keyword=`）定位 `videoId`，再从详情页 `/video?id=` 取介绍正文与预览图；`@connect` 同步从 `7mmtv.sx` 改为 `netflav.com`。

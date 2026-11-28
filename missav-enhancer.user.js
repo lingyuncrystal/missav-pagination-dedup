@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MissAV 综合增强（研发版：翻页去重 + 标题修正 + 片单网格化）
 // @namespace    https://missav.ws/dev
-// @version      4.0.30-dev.43
+// @version      4.0.30-dev.44
 // @description  MissAV / Jable / GetAV 三站合一：1) 翻页去重（MissAV）；2) 三站统一标题增强——中文标题按「缓存 → GetAV 精校中字 → Manko → 大模型」优先级解析，番号为同一性主键跨站复用，最大限度少用大模型；大模型服务内置 Kimi/DeepSeek/OpenAI/GLM 预设；3) 片单网格化（MissAV）；4) 预览独占（MissAV）；5) GetAV 界面增强——标题完整显示、订阅页网格卡片（原 GetAV 脚本并入）；6) 标题完整显示不省略（Jable + MissAV，同排卡片自动等高）
 // @author       Phaeton
 // @license      MIT
@@ -39,6 +39,7 @@
 // @connect      getav.me
 // @connect      jable.tv
 // @connect      netflav.com
+// @connect      7mmtv.sx
 // @connect      manko.fun
 // @connect      healertanker.com
 // @connect      alpharomeo.shop
@@ -780,6 +781,26 @@
             GM_xmlhttpRequest({
                 method: 'GET',
                 url,
+                timeout: 30000,
+                onload: (r) => resolve({ status: r.status, text: r.responseText }),
+                onerror: () => reject(new Error('网络错误')),
+                ontimeout: () => reject(new Error('超时')),
+            });
+        });
+    }
+
+    /** 跨站 POST，供 7mmtv 的番号搜索表单使用（影片介绍的兜底数据源） */
+    function httpPost(url, body) {
+        return new Promise((resolve, reject) => {
+            if (typeof GM_xmlhttpRequest !== 'function') {
+                reject(new Error('当前脚本管理器不支持 GM_xmlhttpRequest'));
+                return;
+            }
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url,
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                data: body,
                 timeout: 30000,
                 onload: (r) => resolve({ status: r.status, text: r.responseText }),
                 onerror: () => reject(new Error('网络错误')),
@@ -3089,9 +3110,9 @@
         const requestSeq = ++getavActorTabsState.requestSeq;
         getavActorTabsState.loading = true;
         if (getavActorTabsState.observer) getavActorTabsState.observer.disconnect();
-        panel.textContent = '正在读取 netflav 影片介绍…';
+        panel.textContent = '正在读取影片介绍…';
         try {
-            const data = await loadNetflavIntro(slug);
+            const data = await loadFilmIntro(slug);
             if (requestSeq !== getavActorTabsState.requestSeq || slug !== getavActorTabsState.slug) return;
             renderFilmIntro(panel, data);
             getavActorTabsState.loaded = true;
@@ -3182,11 +3203,14 @@
 
     /* ================================================================
      * 模块八 film-intro：MissAV 详情页「影片介绍」Tab
-     * 数据源为 netflav.com（Netflav 影视元数据库），三站（MissAV / Jable / GetAV）共用：
-     *   1) GET /search?type=all&keyword=<番号>，服务端直出 __NEXT_DATA__，按 code 精确匹配取 videoId；
-     *   2) GET /video?id=<videoId>，同样从 __NEXT_DATA__ 取 description 与 previewImages，
-     *      结构变动时退回详情页 DOM（.videocoverheader_description）取介绍文字。
-     * 点击 Tab（MissAV）或滚动临近（Jable / GetAV）前不发请求。
+     * 两个数据源，三站（MissAV / Jable / GetAV）共用同一套取数逻辑：
+     *   1) 主源 netflav.com（Next.js 直出 __NEXT_DATA__）：
+     *      GET /search?type=all&keyword=<番号> 按 code 精确匹配取 videoId，
+     *      再 GET /video?id=<videoId> 取 description 与 previewImages；
+     *   2) 兜底 7mmtv.sx：netflav 未收录（FC2 / 老番号）时按番号 POST 搜索，
+     *      中文详情优先、英文回退，从 .video-introduction-images-text 与
+     *      #fullvideo_showallcg 取文字和图片。
+     * 命中哪个用哪个，来源写在面板底部；点击 Tab（MissAV）或滚动临近（Jable / GetAV）前不发请求。
      * 图片只限制宽度为容器宽度，保持原始比例，不裁剪、不拉伸。
      * ================================================================ */
 
@@ -3300,12 +3324,119 @@
         const detail = await httpGet(detailUrl);
         if (detail.status < 200 || detail.status >= 300) throw new Error('netflav 详情 HTTP ' + detail.status);
         const parsed = parseNetflavIntro(detail.text, code);
-        return parsed ? Object.assign(parsed, { url: detailUrl }) : null;
+        return parsed ? Object.assign(parsed, { url: detailUrl, source: 'netflav' }) : null;
     }
 
-    async function loadNetflavIntro(slug) {
+    /* ---------------- 兜底源 7mmtv：netflav 未收录时使用 ----------------
+     * 7mmtv 的详情页有中文/英文两套页面：先 POST 搜索中文详情，找不到或无介绍
+     * 时回退英文；文字和图片都从详情 HTML 解析。netflav 缺 FC2 / 老番号较多，
+     * 这里补齐覆盖率（部分番号只有图片没有文字，此时只展示图片）。
+     */
+
+    const SEVENMMTV_ORIGIN = 'https://7mmtv.sx';
+
+    function parse7mmtvIntro(html, slug) {
+        const doc = new DOMParser().parseFromString(html || '', 'text/html');
+        const heading = doc.querySelector('.fullvideo-title, h1');
+        const headingText = heading ? heading.textContent.trim() : '';
+        if (slug && headingText && headingText.toLowerCase().indexOf(slug.toLowerCase()) === -1) return null;
+        const textNode = doc.querySelector('.video-introduction-images-text');
+        const text = textNode ? textNode.textContent.trim() : '';
+        const images = [];
+        const addImage = (url) => {
+            try {
+                const u = new URL(String(url || ''), SEVENMMTV_ORIGIN);
+                if (u.protocol === 'https:' && !images.includes(u.href)) images.push(u.href);
+            } catch { /* 忽略无效图片地址 */ }
+        };
+        doc.querySelectorAll('#fullvideo_showallcg img').forEach((img) => {
+            addImage(img.getAttribute('data-src') || img.getAttribute('src'));
+        });
+        doc.querySelectorAll('script').forEach((script) => {
+            const source = script.textContent || '';
+            const re = /fullvideo_showallcg_arr\[\d+\]\s*=\s*['"]([^'"]+)['"]/g;
+            let match;
+            while ((match = re.exec(source))) addImage(match[1]);
+        });
+        if (!text && !images.length) return null;
+        return { text, images };
+    }
+
+    async function fetch7mmtvIntro(slug, lang) {
+        const prefix = lang === 'zh' ? 'zh' : 'en';
+        const searchUrl = SEVENMMTV_ORIGIN + '/' + prefix + '/searchform_search/all/index.html';
+        const body = 'op=search&search_keyword=' + encodeURIComponent(slug) + '&search_type=searchall';
+        const search = await httpPost(searchUrl, body);
+        if (search.status < 200 || search.status >= 300) throw new Error(prefix + ' 搜索 HTTP ' + search.status);
+        const searchDoc = new DOMParser().parseFromString(search.text || '', 'text/html');
+        const needle = slug.toLowerCase();
+        let detailUrl = '';
+        for (const anchor of searchDoc.querySelectorAll('a[href]')) {
+            try {
+                const u = new URL(anchor.href, SEVENMMTV_ORIGIN);
+                const last = decodeURIComponent(u.pathname.split('/').pop() || '').replace(/\.html$/i, '');
+                // 详情链接形如 /zh/chinese_content/55828/SONE-604.html，末段即番号
+                if (last.toLowerCase() === needle && /_content\//i.test(u.pathname)) {
+                    detailUrl = u.href;
+                    break;
+                }
+            } catch { /* 忽略异常链接 */ }
+        }
+        if (!detailUrl) return null;
+        const detail = await httpGet(detailUrl);
+        if (detail.status < 200 || detail.status >= 300) throw new Error(prefix + ' 详情 HTTP ' + detail.status);
+        const parsed = parse7mmtvIntro(detail.text, slug);
+        return parsed ? Object.assign(parsed, { lang: prefix, url: detailUrl, source: '7mmtv' }) : null;
+    }
+
+    async function fetch7mmtvFilmIntro(slug) {
+        let zhError = null;
+        try {
+            const zh = await fetch7mmtvIntro(slug, 'zh');
+            if (zh) return zh;
+        } catch (error) { zhError = error; }
+        try {
+            const en = await fetch7mmtvIntro(slug, 'en');
+            if (en) return en;
+        } catch (error) {
+            throw new Error('中文/英文详情均请求失败：' + errorText(error));
+        }
+        if (zhError) throw new Error('中文详情无影片介绍，英文详情也未找到对应影片');
+        return null;
+    }
+
+    function errorText(error) {
+        return (error && error.message) || String(error || '未知错误');
+    }
+
+    /**
+     * 先 netflav、未收录再走 7mmtv。两源都失败才抛错（界面显示重试），
+     * 只有「两源都明确没有这部片」才返回 null（界面显示未找到）。
+     */
+    async function fetchFilmIntro(slug) {
+        let netflavError = null;
+        try {
+            const hit = await fetchNetflavIntro(slug);
+            if (hit) return hit;
+        } catch (error) {
+            netflavError = error;
+        }
+        try {
+            const hit = await fetch7mmtvFilmIntro(slug);
+            if (hit) return hit;
+        } catch (error) {
+            throw new Error('netflav ' + (netflavError ? '请求失败（' + errorText(netflavError) + '）' : '未收录') +
+                '，7mmtv 请求失败（' + errorText(error) + '）');
+        }
+        if (netflavError) {
+            throw new Error('netflav 请求失败（' + errorText(netflavError) + '），7mmtv 未收录该番号');
+        }
+        return null;
+    }
+
+    async function loadFilmIntro(slug) {
         if (filmIntroState.cache[slug]) return filmIntroState.cache[slug];
-        const data = await fetchNetflavIntro(slug);
+        const data = await fetchFilmIntro(slug);
         if (!data) return null;
         return (filmIntroState.cache[slug] = data);
     }
@@ -3313,7 +3444,7 @@
     function renderFilmIntro(panel, data) {
         panel.textContent = '';
         if (!data) {
-            panel.textContent = 'netflav 未找到对应的影片介绍。';
+            panel.textContent = 'netflav 与 7mmtv 均未找到对应的影片介绍。';
             return;
         }
         if (data.text) {
@@ -3322,25 +3453,54 @@
             text.textContent = data.text;
             panel.appendChild(text);
         }
+        // 占位图/空内容时才提示；有文字或还有可用图片就不打扰
+        const insertNote = (message) => {
+            if (panel.querySelector('.mve-film-intro-note')) return;
+            const note = document.createElement('div');
+            note.className = 'mve-film-intro-note';
+            note.textContent = message;
+            panel.insertBefore(note, panel.querySelector('.mve-film-intro-source') || null);
+        };
+        const refreshNote = () => {
+            if (data.text || panel.querySelector('.mve-film-intro-images')) return;
+            insertNote(data.images.length
+                ? '该来源的影片介绍图片已失效，暂时无法显示。'
+                : '该来源没有提供影片介绍文字。');
+        };
         if (data.images.length) {
             const gallery = document.createElement('div');
             gallery.className = 'mve-film-intro-images';
+            // 7mmtv 上不少老番号的 DMM 原图已下架，会 302 到 90×122 的 now_printing 占位图；
+            // 直接按原比例拉满内容区会变成一整块空白，所以加载后按像素尺寸把占位图剔除
+            const dropIfPlaceholder = (img) => {
+                if (!img.naturalWidth || img.naturalWidth >= 200) return;
+                img.remove();
+                if (!gallery.querySelector('img')) gallery.remove();
+            };
             data.images.forEach((url) => {
                 const img = document.createElement('img');
                 img.src = url;
                 img.alt = '影片介绍图片';
                 img.loading = 'lazy';
+                img.addEventListener('load', () => {
+                    dropIfPlaceholder(img);
+                    refreshNote();
+                });
+                if (img.complete) dropIfPlaceholder(img);
                 gallery.appendChild(img);
             });
             panel.appendChild(gallery);
         }
+        refreshNote();
         if (data.url) {
             const source = document.createElement('a');
             source.href = data.url;
             source.target = '_blank';
             source.rel = 'noopener noreferrer';
             source.className = 'mve-film-intro-source';
-            source.textContent = '来源：netflav.com（影片详情）';
+            source.textContent = data.source === '7mmtv'
+                ? '来源：7mmtv.sx（' + (data.lang === 'zh' ? '中文' : '英文') + '详情）'
+                : '来源：netflav.com（影片详情）';
             panel.appendChild(source);
         }
     }
@@ -3414,8 +3574,8 @@
             return;
         }
         filmIntroState.loading = true;
-        panel.textContent = '正在读取 netflav 影片介绍…';
-        loadNetflavIntro(slug).then((data) => renderFilmIntro(panel, data)).catch((e) => {
+        panel.textContent = '正在读取影片介绍…';
+        loadFilmIntro(slug).then((data) => renderFilmIntro(panel, data)).catch((e) => {
             panel.textContent = '影片介绍读取失败：' + ((e && e.message) || e);
         }).finally(() => { filmIntroState.loading = false; });
     }
@@ -3516,6 +3676,7 @@
             '.mve-film-intro-panel{padding:12px 0;line-height:1.7;color:#b8babc;}' +
             '.mve-film-intro-text{white-space:pre-wrap;margin-bottom:16px;}' +
             '.mve-film-intro-images img{display:block;width:100%;height:auto;object-fit:contain;margin:0 auto 12px;}' +
+            '.mve-film-intro-note{margin-bottom:16px;font-size:13px;opacity:.72;}' +
             '.mve-film-intro-source{display:block;margin-top:16px;font-size:12px;opacity:.75;}');
     }
 
@@ -3616,9 +3777,9 @@
             if (jableFilmIntroState.loading) return;
             jableFilmIntroState.loading = true;
             if (intersectionObserver) intersectionObserver.disconnect();
-            body.textContent = '正在读取 netflav 影片介绍…';
+            body.textContent = '正在读取影片介绍…';
             try {
-                const data = await loadNetflavIntro(slug);
+                const data = await loadFilmIntro(slug);
                 renderFilmIntro(body, data);
             } catch (error) {
                 renderJableFilmIntroError(body, error, load);

@@ -61,6 +61,25 @@
 
 截图（本轮临时，未入库）：`/tmp/missav-intro.png`、`/tmp/jable-intro.png`、`/tmp/getav-intro.png`。
 
+## dev.44：补 7mmtv 兜底
+
+netflav 对 FC2 / 老番号收录少，按用户要求保留 7mmtv 作兜底：
+
+- `fetchFilmIntro()`：netflav 命中即用；未收录（或请求失败）再走 7mmtv，仍按「中文详情 → 英文回退」；
+- 两个来源都带 `source` 标记，面板底部显示「来源：netflav.com（影片详情）」或「来源：7mmtv.sx（中文/英文详情）」；
+- 失败语义分层：netflav 失败但 7mmtv 命中 → 正常展示；两源都请求失败 → 抛合并错误给重试；只有两源都明确未收录才显示「未找到」。
+
+实装验证（Chrome + ScriptCat，dev.44）：
+
+| 用例 | 结果 |
+| --- | --- |
+| MissAV `mide-001`（netflav 未收录 / 7mmtv 有） | 回退 7mmtv 中文详情，来源链接 `7mmtv.sx/zh/reducing-mosaic_content/10157/MIDE-001.html` |
+| MissAV `mide-002`（netflav 未收录 / 7mmtv 有真实图） | 回退成功：132 字介绍 + 10 张 800px 图全部加载，来源标注 7mmtv |
+| GetAV `mide-001` 演员卡片 | 同一兜底逻辑生效，Tab 切换正常 |
+| MissAV `sone-604`（netflav 有） | 仍走 netflav（13 图），主源优先级未变 |
+
+**验证中发现并修掉的问题**：老番号（`mide-001`、`snis-002`、`midd-789` 等）在 7mmtv 上的 DMM 原图已下架，`pics.dmm.co.jp/.../*jp-N.jpg` 会 302 到 `pics.dmm.com/mono/movie/n/now_printing/now_printing.jpg`（90×122）。按原比例拉满内容区就是一整块白色空白。现在渲染层按 `naturalWidth < 200` 剔除占位图，整组失效时显示「该来源的影片介绍图片已失效，暂时无法显示。」
+
 ## 已知差异与后续可选项
 
 - **图片类型变化**：netflav 的 `previewImages` 是 DMM 官方样张（带 `madonna-av.com`、`S1` 等水印），与 7mmtv 的无码截图观感不同；数量 10–20 张，与原来相当。
